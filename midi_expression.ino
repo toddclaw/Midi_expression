@@ -66,8 +66,7 @@ constexpr MIDIAddress CC_SOSTENUTO = {MIDI_CC::Sostenuto,    MIDI_CH}; // CC 66
 constexpr unsigned long DETECT_INTERVAL_MS   = 50;   // plug-detect poll rate
 constexpr unsigned long DEBOUNCE_SETTLE_MS   = 200;  // settle time after plug event
 constexpr unsigned long RING_SAMPLE_COUNT    = 8;     // samples for TS/TRS decision
-constexpr uint16_t      RING_THRESHOLD       = 200;   // ADC threshold: below = TS plug
-constexpr uint16_t      EXPRESSION_NOISE     = 2;     // dead-band for expression jitter
+constexpr uint16_t      RING_THRESHOLD       = 200;   // ADC sense-pin threshold (12-bit)
 
 // ---------------------------------------------------------------------------
 // Control Surface MIDI output elements
@@ -187,33 +186,67 @@ bool readDetect(pin_t pin) {
 // Classify an expression-capable jack (J1 or J2) as TRS or TS, and if TS
 // determine switch polarity (NO vs NC).
 //
-// sensePin is the non-wiper pin (used to distinguish TS from TRS):
-//   - TRS plug: sensePin connects to VCC/GND end of pot → reads high
-//   - TS plug:  sleeve spans Ring+Sleeve contacts → sensePin reads ≈ 0
+// Both pins are read to avoid false classification:
 //
-// wiperPin is the pin carrying the expression signal (also used to read
-// the switch state when a TS plug is detected).
+//   TRS expression pedal:
+//     One pin (VCC end of pot) reads high, the other (wiper) can be
+//     anywhere 0–3.3 V.  At least one pin will be well above 0.
+//
+//   TS on/off pedal:
+//     The sleeve of the TS plug spans both Ring and Sleeve contacts,
+//     grounding the Ring side.  The Tip side sees only a switch to
+//     ground, so with the switch open it floats to the pull-up rail
+//     and with the switch closed it reads 0.  Crucially, a TS plug
+//     always pulls the sense pin (Ring) near 0 AND the wiper pin is
+//     at one of the two rails (near 0 or near full-scale) — never in
+//     the middle range that a pot wiper would normally rest at.
+//
+// Decision:
+//   If the sense pin reads HIGH (> threshold)  → TRS (expression).
+//   If the sense pin reads LOW  (≤ threshold)  → could be TS, but
+//     also check the wiper: if it's in the mid-range (not near a
+//     rail) the pot is just at the low end → TRS.  Only classify as
+//     TS when BOTH the sense pin is low AND the wiper is near a rail.
 // ---------------------------------------------------------------------------
+
+// Thresholds (12-bit ADC, 0–4095)
+constexpr uint16_t RAIL_LOW  = 200;   // below this → near GND rail
+constexpr uint16_t RAIL_HIGH = 3895;  // above this → near VCC rail
+
 PedalType classifyJack(pin_t sensePin, pin_t wiperPin) {
-  // Average several sense-pin readings to reject transient noise
+  // Average several readings on each pin to reject transient noise
   uint32_t senseSum = 0;
+  uint32_t wiperSum = 0;
   for (uint16_t i = 0; i < RING_SAMPLE_COUNT; i++) {
     senseSum += analogRead(sensePin);
+    wiperSum += analogRead(wiperPin);
   }
   uint16_t senseAvg = senseSum / RING_SAMPLE_COUNT;
+  uint16_t wiperAvg = wiperSum / RING_SAMPLE_COUNT;
 
-  if (senseAvg < RING_THRESHOLD) {
-    // TS plug detected — determine polarity from the wiper pin
-    uint16_t wiperVal = analogRead(wiperPin);
-    // With pull-up and switch open, wiper pin reads high.
-    // If it reads low now, the switch is closed at rest → NC.
-    if (wiperVal < 2048) {
-      return PedalType::SWITCH_NC;
-    }
-    return PedalType::SWITCH_NO;
+  // If the sense pin reads high, it's seeing the VCC end of a pot → TRS.
+  if (senseAvg > RING_THRESHOLD) {
+    return PedalType::EXPRESSION;
   }
 
-  return PedalType::EXPRESSION;
+  // Sense pin is low.  Check whether the wiper is in a mid-range that
+  // only a pot could produce (a switch can only be at a rail).
+  bool wiperAtRail = (wiperAvg < RAIL_LOW) || (wiperAvg > RAIL_HIGH);
+
+  if (!wiperAtRail) {
+    // Wiper is in the middle → this is a pot with VCC on the other
+    // end wired to GND (some pedals), or the pot is simply near
+    // the ground end.  Either way, it's an expression pedal.
+    return PedalType::EXPRESSION;
+  }
+
+  // Both pins near a rail → TS on/off pedal.
+  // Determine polarity: with pull-up and switch open the wiper pin
+  // reads high; if it reads low the switch is closed at rest → NC.
+  if (wiperAvg < RAIL_LOW) {
+    return PedalType::SWITCH_NC;
+  }
+  return PedalType::SWITCH_NO;
 }
 
 // ---------------------------------------------------------------------------
