@@ -31,13 +31,16 @@ Socket  Pin   KB2040   GPIO    Function                      Pin Config
 ──────  ────  ───────  ──────  ────────────────────────────   ──────────────
 J1      T     A0       GPIO26  Expression / pedal wiper       Analog input
 J1      R     A1       GPIO27  Expression VCC / pedal sense   Analog input
+J1      S     GND      —       Sleeve ground                  —
 J1      S_s   D2       GPIO2   Plug-detect                    INPUT_PULLUP
 
 J2      T     A2       GPIO28  Expression / pedal wiper       Analog input
 J2      R     A3       GPIO29  Expression VCC / pedal sense   Analog input
+J2      S     GND      —       Sleeve ground                  —
 J2      S_s   D3       GPIO3   Plug-detect                    INPUT_PULLUP
 
 J3      T     D4       GPIO4   On/off pedal input             INPUT_PULLUP
+J3      S     GND      —       Sleeve ground                  —
 J3      S_s   D5       GPIO5   Plug-detect                    INPUT_PULLUP
 ```
 
@@ -220,16 +223,19 @@ Tip signal is read; Ring is unused.
                     C1 ─┘  │              │
   J1.R  ── R2 [100Ω]──┬──┤ A1  (GPIO27) │
                     C2 ─┘  │              │
+  J1.S ──────────── GND   │              │  Sleeve ground
   J1.S_s ─────────────────┤ D2  (GPIO2)  │  J1 plug detect
                            │              │
   J2.T  ── R3 [1kΩ] ──┬──┤ A2  (GPIO28) │  Soft pedal (On Stage KSP)
                     C3 ─┘  │              │
   J2.R  ── R4 [100Ω]──┬──┤ A3  (GPIO29) │
                     C4 ─┘  │              │
+  J2.S ──────────── GND   │              │  Sleeve ground
   J2.S_s ─────────────────┤ D3  (GPIO3)  │  J2 plug detect
                            │              │
   J3.T  ── R5 [1kΩ] ──┬──┤ D4  (GPIO4)  │  Sostenuto pedal (Casio SP20)
                     C5 ─┘  │              │
+  J3.S ──────────── GND   │              │  Sleeve ground
   J3.S_s ─────────────────┤ D5  (GPIO5)  │  J3 plug detect
                            │              │
               C6 ── 3V3 ──┤ 3V           │
@@ -238,7 +244,6 @@ Tip signal is read; Ring is unused.
                            └──────────────┘
 
   All T_s pins ──── GND    (ground analog/digital inputs when unplugged)
-  All S pins   ──── GND    (common ground)
   J1.R_s, J2.R_s, J3.R, J3.R_s ──── NC
 ```
 
