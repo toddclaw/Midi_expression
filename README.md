@@ -1,16 +1,16 @@
 # Midi Expression
 
-USB MIDI pedal controller powered by an Adafruit KB2040.
+USB MIDI pedal controller powered by a Teensy 4.1.
 
 ## Overview
 
-This project drives a set of 3 MIDI pedals over USB using an Adafruit KB2040 microcontroller:
+This project drives a set of 3 MIDI pedals over USB using a Teensy 4.1 microcontroller:
 
 1. **Soft pedal (on/off)** -- On Stage OS KSP sustain pedal
 2. **Sostenuto pedal (on/off)** -- Casio SP20
 3. **Sustain pedal (analog/expression)** -- Yamaha FC3A
 
-The KB2040 enumerates as a class-compliant USB MIDI device, so no additional drivers are needed on the host. All pedal messages are hard-coded to **MIDI channel 5**.
+The Teensy 4.1 enumerates as a class-compliant USB MIDI device, so no additional drivers are needed on the host. All pedal messages are hard-coded to **MIDI channel 5**.
 
 ## Hardware
 
