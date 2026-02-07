@@ -35,6 +35,22 @@ constexpr pin_t J3_TIP_PIN    = 2;   // pin 2  — digital, pedal input
 constexpr pin_t J3_DETECT_PIN = 3;   // pin 3  — S_s plug detect
 
 // ---------------------------------------------------------------------------
+// Expression pedal wiper configuration
+//
+// Different expression pedals put the wiper (variable voltage) on
+// different TRS contacts:
+//   TIP  — wiper on Tip, VCC/GND on Ring  (e.g. Yamaha FC3A)
+//   RING — wiper on Ring, VCC/GND on Tip  (some other manufacturers)
+//
+// Set each jack to match the pedal you are plugging in.
+// The non-wiper pin is used as the "sense" pin for TS/TRS detection.
+// ---------------------------------------------------------------------------
+enum class WiperPin : uint8_t { TIP, RING };
+
+constexpr WiperPin J1_WIPER = WiperPin::TIP;   // Yamaha FC3A: wiper on Tip
+constexpr WiperPin J2_WIPER = WiperPin::TIP;   // change to RING if needed
+
+// ---------------------------------------------------------------------------
 // MIDI addresses — all on Channel 5
 // ---------------------------------------------------------------------------
 constexpr Channel MIDI_CH = Channel_5;
@@ -61,13 +77,14 @@ constexpr uint16_t      EXPRESSION_NOISE     = 2;     // dead-band for expressio
 // on J1/J2 is not known until a plug is detected.
 // ---------------------------------------------------------------------------
 
-// J1 sustain — expression pedal (CCPotentiometer) when TRS,
-//              or on/off switch when TS.
-CCPotentiometer j1Expression {J1_TIP_PIN, CC_SUSTAIN};
+// J1 sustain — one CCPotentiometer per possible wiper pin.
+// Only the one matching J1_WIPER is enabled when expression is detected.
+CCPotentiometer j1ExprTip  {J1_TIP_PIN,  CC_SUSTAIN};
+CCPotentiometer j1ExprRing {J1_RING_PIN, CC_SUSTAIN};
 
-// J2 soft — most likely an on/off switch (TS), but the socket is
-//           expression-capable so we keep a CCPotentiometer ready too.
-CCPotentiometer j2Expression {J2_TIP_PIN, CC_SOFT};
+// J2 soft — same approach.
+CCPotentiometer j2ExprTip  {J2_TIP_PIN,  CC_SOFT};
+CCPotentiometer j2ExprRing {J2_RING_PIN, CC_SOFT};
 
 // J3 sostenuto — digital only, always on/off.
 // CCButton sends 0x7F on press, 0x00 on release.
@@ -102,10 +119,11 @@ uint8_t j3LastSent = 0xFF;
 // Forward declarations
 // ---------------------------------------------------------------------------
 bool readDetect(pin_t pin);
-PedalType classifyJack(pin_t ringPin, pin_t tipPin);
+PedalType classifyJack(pin_t sensePin, pin_t wiperPin);
 PedalType classifyDigitalJack(pin_t tipPin);
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                          pin_t ringPin, CCPotentiometer &expr,
+                          pin_t ringPin, WiperPin wiperCfg,
+                          CCPotentiometer &exprTip, CCPotentiometer &exprRing,
                           const MIDIAddress &addr, uint8_t &lastSent);
 void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
                        CCButton &btn, uint8_t &lastSent);
@@ -124,8 +142,10 @@ void setup() {
   pinMode(J3_DETECT_PIN, INPUT_PULLUP);
 
   // Disable all MIDI elements until we detect plugs
-  j1Expression.disable();
-  j2Expression.disable();
+  j1ExprTip.disable();
+  j1ExprRing.disable();
+  j2ExprTip.disable();
+  j2ExprRing.disable();
   j3Button.disable();
 
   Control_Surface.begin();
@@ -147,9 +167,11 @@ void loop() {
   lastDetect = now;
 
   handleExpressionJack(j1State, J1_DETECT_PIN, J1_TIP_PIN, J1_RING_PIN,
-                       j1Expression, CC_SUSTAIN, j1LastSent);
+                       J1_WIPER, j1ExprTip, j1ExprRing,
+                       CC_SUSTAIN, j1LastSent);
   handleExpressionJack(j2State, J2_DETECT_PIN, J2_TIP_PIN, J2_RING_PIN,
-                       j2Expression, CC_SOFT, j2LastSent);
+                       J2_WIPER, j2ExprTip, j2ExprRing,
+                       CC_SOFT, j2LastSent);
   handleDigitalJack(j3State, J3_DETECT_PIN, J3_TIP_PIN,
                     j3Button, j3LastSent);
 }
@@ -165,24 +187,27 @@ bool readDetect(pin_t pin) {
 // Classify an expression-capable jack (J1 or J2) as TRS or TS, and if TS
 // determine switch polarity (NO vs NC).
 //
-// Ring sensing:
-//   - TRS plug: Ring connects to the pedal's pot VCC, Ring ADC reads high
-//   - TS plug:  Sleeve spans both Ring and Sleeve contacts, Ring reads ≈ 0
+// sensePin is the non-wiper pin (used to distinguish TS from TRS):
+//   - TRS plug: sensePin connects to VCC/GND end of pot → reads high
+//   - TS plug:  sleeve spans Ring+Sleeve contacts → sensePin reads ≈ 0
+//
+// wiperPin is the pin carrying the expression signal (also used to read
+// the switch state when a TS plug is detected).
 // ---------------------------------------------------------------------------
-PedalType classifyJack(pin_t ringPin, pin_t tipPin) {
-  // Average several Ring readings to reject transient noise
-  uint32_t ringSum = 0;
+PedalType classifyJack(pin_t sensePin, pin_t wiperPin) {
+  // Average several sense-pin readings to reject transient noise
+  uint32_t senseSum = 0;
   for (uint16_t i = 0; i < RING_SAMPLE_COUNT; i++) {
-    ringSum += analogRead(ringPin);
+    senseSum += analogRead(sensePin);
   }
-  uint16_t ringAvg = ringSum / RING_SAMPLE_COUNT;
+  uint16_t senseAvg = senseSum / RING_SAMPLE_COUNT;
 
-  if (ringAvg < RING_THRESHOLD) {
-    // TS plug detected — determine polarity from Tip
-    uint16_t tipVal = analogRead(tipPin);
-    // With internal pull-up on Tip and the switch open, Tip reads high.
-    // If Tip reads low right now, the switch is closed at rest → NC.
-    if (tipVal < 2048) {
+  if (senseAvg < RING_THRESHOLD) {
+    // TS plug detected — determine polarity from the wiper pin
+    uint16_t wiperVal = analogRead(wiperPin);
+    // With pull-up and switch open, wiper pin reads high.
+    // If it reads low now, the switch is closed at rest → NC.
+    if (wiperVal < 2048) {
       return PedalType::SWITCH_NC;
     }
     return PedalType::SWITCH_NO;
@@ -211,10 +236,21 @@ void sendCC(const MIDIAddress &addr, uint8_t value) {
 
 // ---------------------------------------------------------------------------
 // Handle an expression-capable jack (J1 or J2)
+//
+// wiperCfg selects which TRS contact carries the expression wiper:
+//   TIP  → exprTip is the active CCPotentiometer, Ring is the sense pin
+//   RING → exprRing is the active CCPotentiometer, Tip is the sense pin
 // ---------------------------------------------------------------------------
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                          pin_t ringPin, CCPotentiometer &expr,
+                          pin_t ringPin, WiperPin wiperCfg,
+                          CCPotentiometer &exprTip, CCPotentiometer &exprRing,
                           const MIDIAddress &addr, uint8_t &lastSent) {
+  // Derive sense/wiper roles from config
+  pin_t wiperAnalogPin = (wiperCfg == WiperPin::TIP) ? tipPin  : ringPin;
+  pin_t senseAnalogPin = (wiperCfg == WiperPin::TIP) ? ringPin : tipPin;
+  CCPotentiometer &activeExpr = (wiperCfg == WiperPin::TIP) ? exprTip : exprRing;
+  CCPotentiometer &otherExpr  = (wiperCfg == WiperPin::TIP) ? exprRing : exprTip;
+
   unsigned long now = millis();
   bool plugged = readDetect(detectPin);
 
@@ -225,11 +261,12 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     st.plugged = false;        // not yet settled
     st.type = PedalType::UNKNOWN;
 
-    // Disable element immediately on any plug event
+    // Disable elements immediately on any plug event
     if (st.enabled) {
-      expr.disable();
+      activeExpr.disable();
       st.enabled = false;
     }
+    otherExpr.disable();  // always keep the other one off
 
     // If unplugged, send a zero to clear the controller state
     if (!plugged) {
@@ -251,7 +288,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
       return;
     }
     st.plugged = true;
-    st.type = classifyJack(ringPin, tipPin);
+    st.type = classifyJack(senseAnalogPin, wiperAnalogPin);
   }
 
   if (!st.plugged)
@@ -260,7 +297,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
   // --- Expression pedal (TRS) — let Control Surface handle it ---
   if (st.type == PedalType::EXPRESSION) {
     if (!st.enabled) {
-      expr.enable();
+      activeExpr.enable();
       st.enabled = true;
     }
     // Control_Surface.loop() already reads the pot and sends CC.
@@ -270,12 +307,12 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
   // --- On/off switch (TS) — read manually as digital ---
   // Disable the CCPotentiometer since we're treating this as a switch.
   if (st.enabled) {
-    expr.disable();
+    activeExpr.disable();
     st.enabled = false;
   }
 
-  // Read Tip as digital (the 1 kΩ + pull-up makes this fine)
-  int raw = digitalRead(tipPin);
+  // Read the wiper pin as digital (the 1 kΩ + pull-up makes this fine)
+  int raw = digitalRead(wiperAnalogPin);
 
   // Apply polarity: NO → pressed = LOW; NC → pressed = HIGH
   bool pressed;
