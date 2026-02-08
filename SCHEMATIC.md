@@ -42,6 +42,11 @@ J2      S_s   1        1        Plug-detect                    INPUT_PULLUP
 J3      T     2        2        On/off pedal input             INPUT_PULLUP
 J3      S     GND      —        Sleeve ground                  —
 J3      S_s   3        3        Plug-detect                    INPUT_PULLUP
+
+OLED    SDA   SDA      18       SSD1306 I2C data               I2C (Wire)
+OLED    SCL   SCL      19       SSD1306 I2C clock              I2C (Wire)
+OLED    VCC   3.3V     —        Display power                  —
+OLED    GND   GND      —        Display ground                 —
 ```
 
 Four of the Teensy 4.1's 18 analog channels (A0–A3) are used by J1 and J2,
@@ -64,6 +69,7 @@ R2    100 Ω            1   J1 Ring series — VCC current limit + TS protection
 R3    1 kΩ             1   J2 Tip series protection / LPF
 R4    100 Ω            1   J2 Ring series — VCC current limit + TS protection
 R5    1 kΩ             1   J3 Tip series protection
+OLED  SSD1306 128x64   1   0.96" I2C OLED display (addr 0x3C)
 C1    100 nF ceramic   1   J1 Tip analog smoothing  (LPF with R1, fc ≈ 1.6 kHz)
 C2    100 nF ceramic   1   J1 Ring analog smoothing (LPF with R2, fc ≈ 11 kHz)
 C3    100 nF ceramic   1   J2 Tip analog smoothing  (LPF with R3, fc ≈ 1.6 kHz)
@@ -237,6 +243,11 @@ Tip signal is read; Ring is unused.
                     C5 ─┘  │              │
   J3.S ──────────── GND   │              │  Sleeve ground
   J3.S_s ─────────────────┤ pin 3        │  J3 plug detect
+                           │              │
+  OLED SDA ────────────────┤ SDA (pin 18) │  SSD1306 I2C data
+  OLED SCL ────────────────┤ SCL (pin 19) │  SSD1306 I2C clock
+  OLED VCC ──── 3.3V       │              │
+  OLED GND ──── GND        │              │
                            │              │
               C6 ── 3V3 ──┤ 3.3V         │
               │            │              │
