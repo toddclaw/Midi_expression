@@ -11,11 +11,9 @@
 // MIDI CC number and channel are runtime-configurable per jack
 // (prepared for future I2C rotary encoder input).
 //
-// Control Surface CCPotentiometer objects are constructed dynamically
-// via placement new when an expression pedal is plugged in, and
-// destroyed on unplug.  This lets Control Surface handle analog
-// smoothing and filtering while still supporting runtime-configurable
-// MIDI addresses.
+// Control Surface objects (CCPotentiometer, CCButton) are constructed
+// dynamically via placement new when a pedal is plugged in, and
+// destroyed on unplug.  CCButton.invert() handles NC switch polarity.
 //
 // See SCHEMATIC.md for full wiring details.
 
@@ -157,51 +155,56 @@ JackState j1State, j2State, j3State;
 // ---------------------------------------------------------------------------
 // Dynamically constructed Control Surface elements
 //
-// CCPotentiometer objects are created via placement new when an
-// expression pedal is detected, and destroyed on unplug.  This lets
-// Control Surface handle analog smoothing, filtering, and MIDI sends
-// while allowing the MIDI address to be set at construction time from
-// the current runtime config.
-//
-// On/off switches are handled manually because CCButton does not
-// support polarity inversion (NO vs NC auto-detection).
+// CCPotentiometer and CCButton objects are created via placement new
+// when a pedal is detected, and destroyed on unplug.  This lets
+// Control Surface handle smoothing/filtering (expression) and
+// debouncing (switches).  CCButton.invert() handles NC polarity.
 // ---------------------------------------------------------------------------
 
-// Aligned storage for CCPotentiometer objects
+// Aligned storage
 alignas(CCPotentiometer) uint8_t j1ExprBuf[sizeof(CCPotentiometer)];
 alignas(CCPotentiometer) uint8_t j2ExprBuf[sizeof(CCPotentiometer)];
+alignas(CCButton) uint8_t j1BtnBuf[sizeof(CCButton)];
+alignas(CCButton) uint8_t j2BtnBuf[sizeof(CCButton)];
+alignas(CCButton) uint8_t j3BtnBuf[sizeof(CCButton)];
 CCPotentiometer *j1Expr = nullptr;
 CCPotentiometer *j2Expr = nullptr;
+CCButton *j1Btn = nullptr;
+CCButton *j2Btn = nullptr;
+CCButton *j3Btn = nullptr;
 
-// Create a CCPotentiometer in pre-allocated storage
 void createExpr(uint8_t *buf, CCPotentiometer *&ptr,
                 pin_t pin, const JackMidiConfig &cfg) {
   ptr = new (buf) CCPotentiometer(pin, midiAddr(cfg));
-  ptr->begin();  // init filter (Control_Surface.begin() was already called)
+  ptr->begin();
 }
 
-// Destroy a CCPotentiometer and clear the pointer
 void destroyExpr(CCPotentiometer *&ptr) {
-  if (ptr) {
-    ptr->disable();
-    ptr->~CCPotentiometer();
-    ptr = nullptr;
-  }
+  if (ptr) { ptr->disable(); ptr->~CCPotentiometer(); ptr = nullptr; }
+}
+
+void createBtn(uint8_t *buf, CCButton *&ptr,
+               pin_t pin, const JackMidiConfig &cfg, bool nc) {
+  ptr = new (buf) CCButton(pin, midiAddr(cfg));
+  ptr->begin();
+  if (nc) ptr->invert();
+}
+
+void destroyBtn(CCButton *&ptr) {
+  if (ptr) { ptr->disable(); ptr->~CCButton(); ptr = nullptr; }
 }
 
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
-bool readDetect(pin_t pin);
-PedalType classifyJack(pin_t sensePin, pin_t wiperPin);
-PedalType classifyDigitalJack(pin_t tipPin);
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           pin_t ringPin, WiperPin wiperCfg,
                           JackMidiConfig &cfg,
-                          uint8_t *exprBuf, CCPotentiometer *&exprPtr);
+                          uint8_t *exprBuf, CCPotentiometer *&exprPtr,
+                          uint8_t *btnBuf, CCButton *&btnPtr);
 void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                       JackMidiConfig &cfg);
-void sendCC(const JackMidiConfig &cfg, uint8_t value);
+                       JackMidiConfig &cfg,
+                       uint8_t *btnBuf, CCButton *&btnPtr);
 void updateDisplay();
 
 // ---------------------------------------------------------------------------
@@ -249,10 +252,13 @@ void loop() {
     lastDetect = now;
 
     handleExpressionJack(j1State, J1_DETECT_PIN, J1_TIP_PIN, J1_RING_PIN,
-                         J1_WIPER, j1Midi, j1ExprBuf, j1Expr);
+                         J1_WIPER, j1Midi, j1ExprBuf, j1Expr,
+                         j1BtnBuf, j1Btn);
     handleExpressionJack(j2State, J2_DETECT_PIN, J2_TIP_PIN, J2_RING_PIN,
-                         J2_WIPER, j2Midi, j2ExprBuf, j2Expr);
-    handleDigitalJack(j3State, J3_DETECT_PIN, J3_TIP_PIN, j3Midi);
+                         J2_WIPER, j2Midi, j2ExprBuf, j2Expr,
+                         j2BtnBuf, j2Btn);
+    handleDigitalJack(j3State, J3_DETECT_PIN, J3_TIP_PIN, j3Midi,
+                      j3BtnBuf, j3Btn);
   }
 
   // OLED refresh
@@ -263,14 +269,7 @@ void loop() {
 }
 
 // ---------------------------------------------------------------------------
-// Plug-detect: S_s reads HIGH when a plug is inserted
-// ---------------------------------------------------------------------------
-bool readDetect(pin_t pin) {
-  return digitalRead(pin) == HIGH;
-}
-
-// ---------------------------------------------------------------------------
-// Classify an expression-capable jack as TRS or TS
+// Classification helpers
 // ---------------------------------------------------------------------------
 
 // Thresholds (12-bit ADC, 0–4095)
@@ -278,8 +277,7 @@ constexpr uint16_t RAIL_LOW  = 200;   // below this → near GND rail
 constexpr uint16_t RAIL_HIGH = 3895;  // above this → near VCC rail
 
 PedalType classifyJack(pin_t sensePin, pin_t wiperPin) {
-  uint32_t senseSum = 0;
-  uint32_t wiperSum = 0;
+  uint32_t senseSum = 0, wiperSum = 0;
   for (uint16_t i = 0; i < RING_SAMPLE_COUNT; i++) {
     senseSum += analogRead(sensePin);
     wiperSum += analogRead(wiperPin);
@@ -287,174 +285,118 @@ PedalType classifyJack(pin_t sensePin, pin_t wiperPin) {
   uint16_t senseAvg = senseSum / RING_SAMPLE_COUNT;
   uint16_t wiperAvg = wiperSum / RING_SAMPLE_COUNT;
 
-  if (senseAvg > RING_THRESHOLD)
-    return PedalType::EXPRESSION;
-
-  bool wiperAtRail = (wiperAvg < RAIL_LOW) || (wiperAvg > RAIL_HIGH);
-  if (!wiperAtRail)
-    return PedalType::EXPRESSION;
-
-  if (wiperAvg < RAIL_LOW)
-    return PedalType::SWITCH_NC;
-  return PedalType::SWITCH_NO;
+  if (senseAvg > RING_THRESHOLD) return PedalType::EXPRESSION;
+  if (wiperAvg > RAIL_LOW && wiperAvg < RAIL_HIGH) return PedalType::EXPRESSION;
+  return (wiperAvg < RAIL_LOW) ? PedalType::SWITCH_NC : PedalType::SWITCH_NO;
 }
 
-// ---------------------------------------------------------------------------
-// Classify J3 (digital-only) switch polarity
-// ---------------------------------------------------------------------------
 PedalType classifyDigitalJack(pin_t tipPin) {
-  int val = digitalRead(tipPin);
-  return (val == LOW) ? PedalType::SWITCH_NC : PedalType::SWITCH_NO;
-}
-
-// ---------------------------------------------------------------------------
-// Send a CC message from a JackMidiConfig
-// ---------------------------------------------------------------------------
-void sendCC(const JackMidiConfig &cfg, uint8_t value) {
-  midi.sendControlChange(midiAddr(cfg), value);
+  return (digitalRead(tipPin) == LOW) ? PedalType::SWITCH_NC : PedalType::SWITCH_NO;
 }
 
 // ---------------------------------------------------------------------------
 // Handle an expression-capable jack (J1 or J2)
 //
-// When a TRS expression pedal is detected, a CCPotentiometer is
-// constructed via placement new so Control Surface manages smoothing,
-// filtering, and MIDI output.  When the pedal is unplugged (or a TS
-// switch is detected instead), the CCPotentiometer is destroyed.
-//
-// On/off switches are handled manually with polarity auto-detection.
+// TRS expression → CCPotentiometer (Control Surface smoothing + sends)
+// TS switch      → CCButton + invert() for NC (Control Surface debouncing)
 // ---------------------------------------------------------------------------
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           pin_t ringPin, WiperPin wiperCfg,
                           JackMidiConfig &cfg,
-                          uint8_t *exprBuf, CCPotentiometer *&exprPtr) {
-  pin_t wiperAnalogPin = (wiperCfg == WiperPin::TIP) ? tipPin  : ringPin;
-  pin_t senseAnalogPin = (wiperCfg == WiperPin::TIP) ? ringPin : tipPin;
-
+                          uint8_t *exprBuf, CCPotentiometer *&exprPtr,
+                          uint8_t *btnBuf, CCButton *&btnPtr) {
+  pin_t wiperPin = (wiperCfg == WiperPin::TIP) ? tipPin  : ringPin;
+  pin_t sensePin = (wiperCfg == WiperPin::TIP) ? ringPin : tipPin;
   unsigned long now = millis();
-  bool plugged = readDetect(detectPin);
+  bool plugged = (digitalRead(detectPin) == HIGH);
 
-  // --- Plug event: just inserted or removed ---
+  // Plug event
   if (plugged != st.wasPlugged) {
     st.wasPlugged = plugged;
     st.settleEnd = now + DEBOUNCE_SETTLE_MS;
     st.plugged = false;
     st.type = PedalType::UNKNOWN;
-
-    // Destroy any active CCPotentiometer
     destroyExpr(exprPtr);
-
-    // If unplugged, send a zero to clear the controller state
+    destroyBtn(btnPtr);
     if (!plugged) {
-      sendCC(cfg, 0);
+      midi.sendControlChange(midiAddr(cfg), 0);
       st.lastSent = 0;
     }
     return;
   }
 
-  // --- Waiting for settle ---
-  if (st.settleEnd != 0 && now < st.settleEnd)
-    return;
+  // Settling
+  if (st.settleEnd != 0 && now < st.settleEnd) return;
 
-  // --- Settle complete, classify the pedal ---
-  if (st.settleEnd != 0 && now >= st.settleEnd) {
+  // Settle complete → classify and construct
+  if (st.settleEnd != 0) {
     st.settleEnd = 0;
-    if (!plugged) {
-      st.plugged = false;
-      return;
-    }
+    if (!plugged) { st.plugged = false; return; }
     st.plugged = true;
-    st.type = classifyJack(senseAnalogPin, wiperAnalogPin);
-
-    // If expression pedal, construct a CCPotentiometer and let
-    // Control Surface take over analog reads, smoothing, and sends.
-    if (st.type == PedalType::EXPRESSION) {
-      createExpr(exprBuf, exprPtr, wiperAnalogPin, cfg);
-    }
+    st.type = classifyJack(sensePin, wiperPin);
+    if (st.type == PedalType::EXPRESSION)
+      createExpr(exprBuf, exprPtr, wiperPin, cfg);
+    else
+      createBtn(btnBuf, btnPtr, wiperPin, cfg, st.type == PedalType::SWITCH_NC);
   }
 
-  if (!st.plugged)
-    return;
+  if (!st.plugged) return;
 
-  // --- Expression pedal (TRS) — Control Surface handles everything ---
+  // Update lastSent for display (Control Surface handles actual MIDI)
   if (st.type == PedalType::EXPRESSION) {
-    // Read the wiper pin for display purposes only.
-    // Control_Surface.loop() handles the actual filtered MIDI sends.
-    uint8_t approx = analogRead(wiperAnalogPin) >> 5;
-    if (approx > 127) approx = 127;
-    st.lastSent = approx;
-    return;
-  }
-
-  // --- On/off switch (TS) — manual send with polarity handling ---
-  int raw = digitalRead(wiperAnalogPin);
-
-  bool pressed;
-  if (st.type == PedalType::SWITCH_NC)
-    pressed = (raw == HIGH);
-  else
-    pressed = (raw == LOW);
-
-  uint8_t value = pressed ? 0x7F : 0x00;
-  if (value != st.lastSent) {
-    sendCC(cfg, value);
-    st.lastSent = value;
+    uint8_t v = analogRead(wiperPin) >> 5;
+    st.lastSent = min(v, (uint8_t)127);
+  } else {
+    bool pressed = (st.type == PedalType::SWITCH_NC)
+                   ? (digitalRead(wiperPin) == HIGH)
+                   : (digitalRead(wiperPin) == LOW);
+    st.lastSent = pressed ? 0x7F : 0x00;
   }
 }
 
 // ---------------------------------------------------------------------------
 // Handle the digital-only jack (J3)
+//
+// Always a switch → CCButton + invert() for NC
 // ---------------------------------------------------------------------------
 void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                       JackMidiConfig &cfg) {
+                       JackMidiConfig &cfg,
+                       uint8_t *btnBuf, CCButton *&btnPtr) {
   unsigned long now = millis();
-  bool plugged = readDetect(detectPin);
+  bool plugged = (digitalRead(detectPin) == HIGH);
 
-  // --- Plug event ---
   if (plugged != st.wasPlugged) {
     st.wasPlugged = plugged;
     st.settleEnd = now + DEBOUNCE_SETTLE_MS;
     st.plugged = false;
     st.type = PedalType::UNKNOWN;
-
+    destroyBtn(btnPtr);
     if (!plugged) {
-      sendCC(cfg, 0);
+      midi.sendControlChange(midiAddr(cfg), 0);
       st.lastSent = 0;
     }
     return;
   }
 
-  if (st.settleEnd != 0 && now < st.settleEnd)
-    return;
+  if (st.settleEnd != 0 && now < st.settleEnd) return;
 
-  if (st.settleEnd != 0 && now >= st.settleEnd) {
+  if (st.settleEnd != 0) {
     st.settleEnd = 0;
-    if (!plugged) {
-      st.plugged = false;
-      return;
-    }
+    if (!plugged) { st.plugged = false; return; }
     st.plugged = true;
     pinMode(tipPin, INPUT_PULLUP);
     delay(5);
     st.type = classifyDigitalJack(tipPin);
+    createBtn(btnBuf, btnPtr, tipPin, cfg, st.type == PedalType::SWITCH_NC);
   }
 
-  if (!st.plugged)
-    return;
+  if (!st.plugged) return;
 
-  int raw = digitalRead(tipPin);
-
-  bool pressed;
-  if (st.type == PedalType::SWITCH_NC)
-    pressed = (raw == HIGH);
-  else
-    pressed = (raw == LOW);
-
-  uint8_t value = pressed ? 0x7F : 0x00;
-  if (value != st.lastSent) {
-    sendCC(cfg, value);
-    st.lastSent = value;
-  }
+  // Update lastSent for display
+  bool pressed = (st.type == PedalType::SWITCH_NC)
+                 ? (digitalRead(tipPin) == HIGH)
+                 : (digitalRead(tipPin) == LOW);
+  st.lastSent = pressed ? 0x7F : 0x00;
 }
 
 // ---------------------------------------------------------------------------
