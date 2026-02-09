@@ -11,12 +11,19 @@
 // MIDI CC number and channel are runtime-configurable per jack
 // (prepared for future I2C rotary encoder input).
 //
+// Control Surface CCPotentiometer objects are constructed dynamically
+// via placement new when an expression pedal is plugged in, and
+// destroyed on unplug.  This lets Control Surface handle analog
+// smoothing and filtering while still supporting runtime-configurable
+// MIDI addresses.
+//
 // See SCHEMATIC.md for full wiring details.
 
 #include <Control_Surface.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <new>  // placement new
 
 // ---------------------------------------------------------------------------
 // MIDI interface — Teensy native USB MIDI
@@ -55,15 +62,15 @@ constexpr pin_t J3_DETECT_PIN = 3;   // pin 3  — S_s plug detect
 //
 // Different expression pedals put the wiper (variable voltage) on
 // different TRS contacts:
-//   TIP  — wiper on Tip, VCC/GND on Ring  (e.g. Yamaha FC3A)
-//   RING — wiper on Ring, VCC/GND on Tip  (some other manufacturers)
+//   TIP  — wiper on Tip, VCC/GND on Ring
+//   RING — wiper on Ring, VCC/GND on Tip  (e.g. Yamaha FC3A)
 //
 // Set each jack to match the pedal you are plugging in.
 // The non-wiper pin is used as the "sense" pin for TS/TRS detection.
 // ---------------------------------------------------------------------------
 enum class WiperPin : uint8_t { TIP, RING };
 
-constexpr WiperPin J1_WIPER = WiperPin::TIP;   // Yamaha FC3A: wiper on Tip
+constexpr WiperPin J1_WIPER = WiperPin::RING;  // Yamaha FC3A: wiper on Ring
 constexpr WiperPin J2_WIPER = WiperPin::TIP;   // change to RING if needed
 
 // ---------------------------------------------------------------------------
@@ -142,20 +149,45 @@ struct JackState {
   bool       wasPlugged    = false;
   PedalType  type          = PedalType::UNKNOWN;
   unsigned long settleEnd  = 0;       // debounce after plug event
-  uint8_t    lastSent      = 0xFF;    // last CC value sent
-  uint16_t   rawValue      = 0;       // last raw ADC / digital reading
+  uint8_t    lastSent      = 0xFF;    // last CC value sent (0xFF = none)
 };
 
 JackState j1State, j2State, j3State;
 
 // ---------------------------------------------------------------------------
-// Analog smoothing for manual expression reads
+// Dynamically constructed Control Surface elements
+//
+// CCPotentiometer objects are created via placement new when an
+// expression pedal is detected, and destroyed on unplug.  This lets
+// Control Surface handle analog smoothing, filtering, and MIDI sends
+// while allowing the MIDI address to be set at construction time from
+// the current runtime config.
+//
+// On/off switches are handled manually because CCButton does not
+// support polarity inversion (NO vs NC auto-detection).
 // ---------------------------------------------------------------------------
-constexpr uint8_t SMOOTH_SHIFT = 3;   // 2^3 = 8 sample moving average
-uint32_t j1Smooth = 0;
-uint32_t j2Smooth = 0;
-bool     j1SmoothInit = false;
-bool     j2SmoothInit = false;
+
+// Aligned storage for CCPotentiometer objects
+alignas(CCPotentiometer) uint8_t j1ExprBuf[sizeof(CCPotentiometer)];
+alignas(CCPotentiometer) uint8_t j2ExprBuf[sizeof(CCPotentiometer)];
+CCPotentiometer *j1Expr = nullptr;
+CCPotentiometer *j2Expr = nullptr;
+
+// Create a CCPotentiometer in pre-allocated storage
+void createExpr(uint8_t *buf, CCPotentiometer *&ptr,
+                pin_t pin, const JackMidiConfig &cfg) {
+  ptr = new (buf) CCPotentiometer(pin, midiAddr(cfg));
+  ptr->begin();  // init filter (Control_Surface.begin() was already called)
+}
+
+// Destroy a CCPotentiometer and clear the pointer
+void destroyExpr(CCPotentiometer *&ptr) {
+  if (ptr) {
+    ptr->disable();
+    ptr->~CCPotentiometer();
+    ptr = nullptr;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -165,8 +197,8 @@ PedalType classifyJack(pin_t sensePin, pin_t wiperPin);
 PedalType classifyDigitalJack(pin_t tipPin);
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           pin_t ringPin, WiperPin wiperCfg,
-                          JackMidiConfig &cfg, uint32_t &smooth,
-                          bool &smoothInit);
+                          JackMidiConfig &cfg,
+                          uint8_t *exprBuf, CCPotentiometer *&exprPtr);
 void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
                        JackMidiConfig &cfg);
 void sendCC(const JackMidiConfig &cfg, uint8_t value);
@@ -217,9 +249,9 @@ void loop() {
     lastDetect = now;
 
     handleExpressionJack(j1State, J1_DETECT_PIN, J1_TIP_PIN, J1_RING_PIN,
-                         J1_WIPER, j1Midi, j1Smooth, j1SmoothInit);
+                         J1_WIPER, j1Midi, j1ExprBuf, j1Expr);
     handleExpressionJack(j2State, J2_DETECT_PIN, J2_TIP_PIN, J2_RING_PIN,
-                         J2_WIPER, j2Midi, j2Smooth, j2SmoothInit);
+                         J2_WIPER, j2Midi, j2ExprBuf, j2Expr);
     handleDigitalJack(j3State, J3_DETECT_PIN, J3_TIP_PIN, j3Midi);
   }
 
@@ -285,31 +317,37 @@ void sendCC(const JackMidiConfig &cfg, uint8_t value) {
 // ---------------------------------------------------------------------------
 // Handle an expression-capable jack (J1 or J2)
 //
-// All MIDI is sent manually (no CCPotentiometer) so the CC number and
-// channel can be changed at runtime without reconstructing objects.
+// When a TRS expression pedal is detected, a CCPotentiometer is
+// constructed via placement new so Control Surface manages smoothing,
+// filtering, and MIDI output.  When the pedal is unplugged (or a TS
+// switch is detected instead), the CCPotentiometer is destroyed.
+//
+// On/off switches are handled manually with polarity auto-detection.
 // ---------------------------------------------------------------------------
 void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           pin_t ringPin, WiperPin wiperCfg,
-                          JackMidiConfig &cfg, uint32_t &smooth,
-                          bool &smoothInit) {
+                          JackMidiConfig &cfg,
+                          uint8_t *exprBuf, CCPotentiometer *&exprPtr) {
   pin_t wiperAnalogPin = (wiperCfg == WiperPin::TIP) ? tipPin  : ringPin;
   pin_t senseAnalogPin = (wiperCfg == WiperPin::TIP) ? ringPin : tipPin;
 
   unsigned long now = millis();
   bool plugged = readDetect(detectPin);
 
-  // --- Plug event ---
+  // --- Plug event: just inserted or removed ---
   if (plugged != st.wasPlugged) {
     st.wasPlugged = plugged;
     st.settleEnd = now + DEBOUNCE_SETTLE_MS;
     st.plugged = false;
     st.type = PedalType::UNKNOWN;
-    smoothInit = false;
 
+    // Destroy any active CCPotentiometer
+    destroyExpr(exprPtr);
+
+    // If unplugged, send a zero to clear the controller state
     if (!plugged) {
       sendCC(cfg, 0);
       st.lastSent = 0;
-      st.rawValue = 0;
     }
     return;
   }
@@ -318,7 +356,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
   if (st.settleEnd != 0 && now < st.settleEnd)
     return;
 
-  // --- Settle complete ---
+  // --- Settle complete, classify the pedal ---
   if (st.settleEnd != 0 && now >= st.settleEnd) {
     st.settleEnd = 0;
     if (!plugged) {
@@ -327,39 +365,29 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     }
     st.plugged = true;
     st.type = classifyJack(senseAnalogPin, wiperAnalogPin);
-    smoothInit = false;
+
+    // If expression pedal, construct a CCPotentiometer and let
+    // Control Surface take over analog reads, smoothing, and sends.
+    if (st.type == PedalType::EXPRESSION) {
+      createExpr(exprBuf, exprPtr, wiperAnalogPin, cfg);
+    }
   }
 
   if (!st.plugged)
     return;
 
-  // --- Expression pedal (TRS) — manual analog read + smoothing ---
+  // --- Expression pedal (TRS) — Control Surface handles everything ---
   if (st.type == PedalType::EXPRESSION) {
-    uint16_t raw = analogRead(wiperAnalogPin);
-    st.rawValue = raw;
-
-    // Simple exponential moving average
-    if (!smoothInit) {
-      smooth = (uint32_t)raw << SMOOTH_SHIFT;
-      smoothInit = true;
-    }
-    smooth = smooth - (smooth >> SMOOTH_SHIFT) + raw;
-    uint16_t averaged = smooth >> SMOOTH_SHIFT;
-
-    // Map 12-bit (0–4095) to 7-bit (0–127)
-    uint8_t value = averaged >> 5;
-    if (value > 127) value = 127;
-
-    if (value != st.lastSent) {
-      sendCC(cfg, value);
-      st.lastSent = value;
-    }
+    // Read the wiper pin for display purposes only.
+    // Control_Surface.loop() handles the actual filtered MIDI sends.
+    uint8_t approx = analogRead(wiperAnalogPin) >> 5;
+    if (approx > 127) approx = 127;
+    st.lastSent = approx;
     return;
   }
 
-  // --- On/off switch (TS) ---
+  // --- On/off switch (TS) — manual send with polarity handling ---
   int raw = digitalRead(wiperAnalogPin);
-  st.rawValue = (raw == HIGH) ? 4095 : 0;
 
   bool pressed;
   if (st.type == PedalType::SWITCH_NC)
@@ -392,7 +420,6 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
     if (!plugged) {
       sendCC(cfg, 0);
       st.lastSent = 0;
-      st.rawValue = 0;
     }
     return;
   }
@@ -416,7 +443,6 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
     return;
 
   int raw = digitalRead(tipPin);
-  st.rawValue = (raw == HIGH) ? 4095 : 0;
 
   bool pressed;
   if (st.type == PedalType::SWITCH_NC)
@@ -448,7 +474,7 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
 
 void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
                  const JackMidiConfig &cfg) {
-  // Line 1: "Jn: Plugged  TRS" or "Jn: Unplugged"
+  // Line 1: "Jn: In TRS Expr" or "Jn: Unplugged"
   oled.setCursor(0, y);
   oled.print(F("J"));
   oled.print(jackNum);
@@ -466,7 +492,7 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
     }
   }
 
-  // Line 2: "  CC64 Sustain  ch5  127"
+  // Line 2: "  CC 64 Sustain  c 5  127"
   oled.setCursor(0, y + 8);
   oled.print(F("  CC"));
   if (cfg.cc < 100) oled.print(F(" "));
@@ -482,8 +508,7 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
     oled.print(cfg.cc);
   }
 
-  // Pad to fixed column for channel + value
-  // Channel at column 90, value at column 108
+  // Channel at column 84, value at column 108
   oled.setCursor(84, y + 8);
   oled.print(F("c"));
   if (cfg.channel < 10) oled.print(F(" "));
