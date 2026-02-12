@@ -47,6 +47,12 @@ OLED    SDA   SDA      18       SSD1306 I2C data               I2C (Wire)
 OLED    SCL   SCL      19       SSD1306 I2C clock              I2C (Wire)
 OLED    VCC   3.3V     —        Display power                  —
 OLED    GND   GND      —        Display ground                 —
+
+ENC     CLK   4        4        Encoder A phase                Digital input
+ENC     DT    5        5        Encoder B phase                Digital input
+ENC     SW    6        6        Encoder push-button            INPUT_PULLUP
+ENC     +     3.3V     —        Encoder power (3.3 V only!)    —
+ENC     GND   GND      —        Encoder ground                 —
 ```
 
 Four of the Teensy 4.1's 18 analog channels (A0–A3) are used by J1 and J2,
@@ -70,6 +76,7 @@ R3    1 kΩ             1   J2 Tip series protection / LPF
 R4    100 Ω            1   J2 Ring series — VCC current limit + TS protection
 R5    1 kΩ             1   J3 Tip series protection
 OLED  SSD1306 128x64   1   0.96" I2C OLED display (addr 0x3C)
+ENC   KY-040           1   360° rotary encoder module with push-button
 C1    100 nF ceramic   1   J1 Tip analog smoothing  (LPF with R1, fc ≈ 1.6 kHz)
 C2    100 nF ceramic   1   J1 Ring analog smoothing (LPF with R2, fc ≈ 11 kHz)
 C3    100 nF ceramic   1   J2 Tip analog smoothing  (LPF with R3, fc ≈ 1.6 kHz)
@@ -218,6 +225,46 @@ Tip signal is read; Ring is unused.
 
 ---
 
+## Circuit — KY-040 Rotary Encoder
+
+Used for live editing of MIDI CC numbers and channels on the OLED display.
+
+The KY-040 module has on-board 10 kΩ pull-up resistors on CLK, DT, and SW.
+No external components are needed.
+
+**IMPORTANT:** Power the module from **3.3 V**, not 5 V. The Teensy 4.1 is
+not 5 V tolerant.
+
+```
+            KY-040 Module                Teensy 4.1
+           ┌─────────────┐              ┌──────────┐
+    CLK ●──┤             ├───────────── ┤ pin 4    │
+           │             │              │          │
+     DT ●──┤             ├───────────── ┤ pin 5    │
+           │             │              │          │
+     SW ●──┤             ├───────────── ┤ pin 6    │
+           │             │              │          │
+      + ●──┤             ├──── 3.3V     │          │
+           │             │              │          │
+    GND ●──┤             ├──── GND      │          │
+           └─────────────┘              └──────────┘
+```
+
+### Encoder Wiring Notes
+
+| Module pin | Connection | Purpose |
+|------------|------------|---------|
+| CLK        | → pin 4   | Quadrature A phase. Module pull-up to VCC; active LOW when contact closes. |
+| DT         | → pin 5   | Quadrature B phase. Phase relationship to CLK determines rotation direction. |
+| SW         | → pin 6 (INPUT_PULLUP) | Push-button. Active LOW when pressed. |
+| +          | → 3.3V    | Module supply — must be 3.3 V for Teensy compatibility. |
+| GND        | → GND     | Common ground. |
+
+If rotation direction is reversed (clockwise decreases values), swap the CLK
+and DT wires.
+
+---
+
 ## System Overview Diagram
 
 ```
@@ -248,6 +295,12 @@ Tip signal is read; Ring is unused.
   OLED SCL ────────────────┤ SCL (pin 19) │  SSD1306 I2C clock
   OLED VCC ──── 3.3V       │              │
   OLED GND ──── GND        │              │
+                           │              │
+  ENC CLK ─────────────────┤ pin 4        │  KY-040 rotary encoder
+  ENC DT  ─────────────────┤ pin 5        │
+  ENC SW  ─────────────────┤ pin 6        │
+  ENC +   ──── 3.3V        │              │
+  ENC GND ──── GND         │              │
                            │              │
               C6 ── 3V3 ──┤ 3.3V         │
               │            │              │

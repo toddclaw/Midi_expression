@@ -9,7 +9,7 @@
 //
 // 128x64 SSD1306 OLED on I2C (SDA=18, SCL=19) displays live status.
 // MIDI CC number and channel are runtime-configurable per jack
-// (prepared for future I2C rotary encoder input).
+// via a KY-040 rotary encoder (CLK=pin 4, DT=pin 5, SW=pin 6).
 //
 // Control Surface objects (CCPotentiometer, CCButton) are constructed
 // dynamically via placement new when a pedal is plugged in, and
@@ -22,6 +22,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <new>  // placement new
+#include <Encoder.h>  // PJRC Encoder library (bundled with Teensyduino)
 
 // ---------------------------------------------------------------------------
 // MIDI interface — Teensy native USB MIDI
@@ -54,6 +55,11 @@ constexpr pin_t J2_DETECT_PIN = 1;   // pin 1  — S_s plug detect
 // J3 — digital-only socket (Sostenuto / Casio SP20)
 constexpr pin_t J3_TIP_PIN    = 2;   // pin 2  — digital, pedal input
 constexpr pin_t J3_DETECT_PIN = 3;   // pin 3  — S_s plug detect
+
+// KY-040 rotary encoder (active-LOW outputs, power from 3.3 V only)
+constexpr pin_t ENC_CLK_PIN = 4;   // encoder A phase
+constexpr pin_t ENC_DT_PIN  = 5;   // encoder B phase
+constexpr pin_t ENC_SW_PIN  = 6;   // push-button
 
 // ---------------------------------------------------------------------------
 // Expression pedal wiper configuration
@@ -105,7 +111,7 @@ const char *ccName(uint8_t cc) {
 // ---------------------------------------------------------------------------
 // Per-jack runtime-configurable MIDI settings
 //
-// These are variables (not constexpr) so a future rotary encoder can
+// These are variables (not constexpr) so the rotary encoder can
 // change them at runtime.  Default values match the original design.
 // ---------------------------------------------------------------------------
 struct JackMidiConfig {
@@ -113,7 +119,7 @@ struct JackMidiConfig {
   uint8_t channel;  // MIDI channel (1–16, stored as 1-based for display)
 };
 
-// Defaults — edit these or change at runtime via encoder (future)
+// Defaults — edit these or change at runtime via the rotary encoder
 JackMidiConfig j1Midi = { 64, 5 };   // CC 64 Sustain,   Channel 5
 JackMidiConfig j2Midi = { 67, 5 };   // CC 67 Soft Pedal, Channel 5
 JackMidiConfig j3Midi = { 66, 5 };   // CC 66 Sostenuto,  Channel 5
@@ -131,6 +137,37 @@ constexpr unsigned long DEBOUNCE_SETTLE_MS   = 200;  // settle time after plug e
 constexpr unsigned long RING_SAMPLE_COUNT    = 8;     // samples for TS/TRS decision
 constexpr uint16_t      RING_THRESHOLD       = 200;   // ADC sense-pin threshold (12-bit)
 constexpr unsigned long DISPLAY_INTERVAL_MS  = 100;   // OLED refresh rate (~10 fps)
+
+// ---------------------------------------------------------------------------
+// Rotary encoder — KY-040 for live MIDI parameter editing
+//
+// Push the button to cycle through editable fields:
+//   (off) → J1 CC → J1 Ch → J2 CC → J2 Ch → J3 CC → J3 Ch → (off)
+// Rotate to change the selected value.  Edit mode auto-exits after
+// 10 seconds of inactivity.
+// ---------------------------------------------------------------------------
+Encoder encoder(ENC_CLK_PIN, ENC_DT_PIN);
+
+enum class EditField : uint8_t {
+  NONE,
+  J1_CC, J1_CH,
+  J2_CC, J2_CH,
+  J3_CC, J3_CH,
+};
+constexpr uint8_t EDIT_FIELD_COUNT = 6;
+
+EditField     editField        = EditField::NONE;
+unsigned long editLastActivity = 0;
+constexpr unsigned long EDIT_TIMEOUT_MS = 10000;  // auto-exit after 10 s
+
+// Button debounce
+bool          encBtnLast       = HIGH;
+unsigned long encBtnDebounce   = 0;
+constexpr unsigned long ENC_BTN_DEBOUNCE_MS = 50;
+
+// Rotation tracking
+long encLastPos = 0;
+constexpr int ENC_COUNTS_PER_DETENT = 4;  // KY-040 with PJRC Encoder lib
 
 // ---------------------------------------------------------------------------
 // Per-jack runtime state
@@ -205,6 +242,14 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
 void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
                        JackMidiConfig &cfg,
                        uint8_t *btnBuf, CCButton *&btnPtr);
+void handleEncoder();
+void applyEncoderChange(int steps);
+void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
+                     WiperPin wiperCfg, JackMidiConfig &cfg,
+                     uint8_t *exprBuf, CCPotentiometer *&exprPtr,
+                     uint8_t *btnBuf, CCButton *&btnPtr);
+void rebuildDigitalJack(JackState &st, pin_t tipPin, JackMidiConfig &cfg,
+                        uint8_t *btnBuf, CCButton *&btnPtr);
 void updateDisplay();
 
 // ---------------------------------------------------------------------------
@@ -221,6 +266,9 @@ void setup() {
 
   // J3 Tip — digital input with pull-up
   pinMode(J3_TIP_PIN, INPUT_PULLUP);
+
+  // Encoder push-button (CLK & DT handled by Encoder library)
+  pinMode(ENC_SW_PIN, INPUT_PULLUP);
 
   // OLED init
   Wire.begin();
@@ -246,6 +294,9 @@ void loop() {
   static unsigned long lastDetect  = 0;
   static unsigned long lastDisplay = 0;
   unsigned long now = millis();
+
+  // Rotary encoder input (every loop — encoder is interrupt-driven)
+  handleEncoder();
 
   // Plug-detect and pedal management
   if (now - lastDetect >= DETECT_INTERVAL_MS) {
@@ -400,6 +451,120 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
 }
 
 // ---------------------------------------------------------------------------
+// Rotary encoder — rebuild helpers & input handling
+// ---------------------------------------------------------------------------
+
+void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
+                     WiperPin wiperCfg, JackMidiConfig &cfg,
+                     uint8_t *exprBuf, CCPotentiometer *&exprPtr,
+                     uint8_t *btnBuf, CCButton *&btnPtr) {
+  if (!st.plugged) return;
+  pin_t wiperPin = (wiperCfg == WiperPin::TIP) ? tipPin : ringPin;
+  if (st.type == PedalType::EXPRESSION) {
+    destroyExpr(exprPtr);
+    createExpr(exprBuf, exprPtr, wiperPin, cfg);
+  } else if (st.type == PedalType::SWITCH_NO || st.type == PedalType::SWITCH_NC) {
+    destroyBtn(btnPtr);
+    createBtn(btnBuf, btnPtr, wiperPin, cfg, st.type == PedalType::SWITCH_NC);
+  }
+}
+
+void rebuildDigitalJack(JackState &st, pin_t tipPin, JackMidiConfig &cfg,
+                        uint8_t *btnBuf, CCButton *&btnPtr) {
+  if (!st.plugged) return;
+  destroyBtn(btnPtr);
+  createBtn(btnBuf, btnPtr, tipPin, cfg, st.type == PedalType::SWITCH_NC);
+}
+
+void applyEncoderChange(int steps) {
+  JackMidiConfig *cfg = nullptr;
+  bool isCC = false;
+
+  switch (editField) {
+    case EditField::J1_CC: cfg = &j1Midi; isCC = true;  break;
+    case EditField::J1_CH: cfg = &j1Midi; isCC = false; break;
+    case EditField::J2_CC: cfg = &j2Midi; isCC = true;  break;
+    case EditField::J2_CH: cfg = &j2Midi; isCC = false; break;
+    case EditField::J3_CC: cfg = &j3Midi; isCC = true;  break;
+    case EditField::J3_CH: cfg = &j3Midi; isCC = false; break;
+    default: return;
+  }
+
+  uint8_t oldCC = cfg->cc;
+  uint8_t oldCh = cfg->channel;
+
+  if (isCC) {
+    int v = (int)cfg->cc + steps;
+    cfg->cc = constrain(v, 0, 127);
+  } else {
+    int v = (int)cfg->channel + steps;
+    cfg->channel = constrain(v, 1, 16);
+  }
+
+  if (cfg->cc == oldCC && cfg->channel == oldCh) return;
+
+  // Zero the old CC so the host doesn't see a stuck controller
+  midi.sendControlChange({oldCC, Channel(oldCh - 1)}, 0);
+
+  // Rebuild the active Control Surface object with the new address
+  switch (editField) {
+    case EditField::J1_CC:
+    case EditField::J1_CH:
+      rebuildExprJack(j1State, J1_TIP_PIN, J1_RING_PIN, J1_WIPER,
+                      j1Midi, j1ExprBuf, j1Expr, j1BtnBuf, j1Btn);
+      break;
+    case EditField::J2_CC:
+    case EditField::J2_CH:
+      rebuildExprJack(j2State, J2_TIP_PIN, J2_RING_PIN, J2_WIPER,
+                      j2Midi, j2ExprBuf, j2Expr, j2BtnBuf, j2Btn);
+      break;
+    case EditField::J3_CC:
+    case EditField::J3_CH:
+      rebuildDigitalJack(j3State, J3_TIP_PIN, j3Midi, j3BtnBuf, j3Btn);
+      break;
+    default: break;
+  }
+}
+
+void handleEncoder() {
+  unsigned long now = millis();
+
+  // --- Button: cycle through editable fields ---
+  bool btn = digitalRead(ENC_SW_PIN);
+  if (btn != encBtnLast && (now - encBtnDebounce) >= ENC_BTN_DEBOUNCE_MS) {
+    encBtnDebounce = now;
+    encBtnLast = btn;
+    if (btn == LOW) {  // active-low (KY-040 pulls to GND when pressed)
+      editLastActivity = now;
+      uint8_t f = static_cast<uint8_t>(editField) + 1;
+      if (f > EDIT_FIELD_COUNT) f = 0;
+      editField = static_cast<EditField>(f);
+      encLastPos = encoder.read();  // reset baseline on field change
+    }
+  }
+
+  // --- Auto-timeout ---
+  if (editField != EditField::NONE &&
+      (now - editLastActivity) >= EDIT_TIMEOUT_MS) {
+    editField = EditField::NONE;
+    return;
+  }
+
+  if (editField == EditField::NONE) return;
+
+  // --- Rotation: change selected value ---
+  long pos = encoder.read();
+  long diff = pos - encLastPos;
+  if (abs(diff) < ENC_COUNTS_PER_DETENT) return;
+
+  int steps = diff / ENC_COUNTS_PER_DETENT;
+  encLastPos += steps * ENC_COUNTS_PER_DETENT;
+  editLastActivity = now;
+
+  applyEncoderChange(steps);
+}
+
+// ---------------------------------------------------------------------------
 // OLED display — draw live status for all three jacks
 //
 // Layout (128x64, 6x8 font = 21 chars x 8 rows):
@@ -415,7 +580,7 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
 // ---------------------------------------------------------------------------
 
 void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
-                 const JackMidiConfig &cfg) {
+                 const JackMidiConfig &cfg, bool hlCC, bool hlCh) {
   // Line 1: "Jn: In TRS Expr" or "Jn: Unplugged"
   oled.setCursor(0, y);
   oled.print(F("J"));
@@ -436,6 +601,7 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
 
   // Line 2: "  CC 64 Sustain  c 5  127"
   oled.setCursor(0, y + 8);
+  if (hlCC) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
   oled.print(F("  CC"));
   if (cfg.cc < 100) oled.print(F(" "));
   if (cfg.cc < 10)  oled.print(F(" "));
@@ -449,12 +615,15 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
     oled.print(F("CC"));
     oled.print(cfg.cc);
   }
+  if (hlCC) oled.setTextColor(SSD1306_WHITE);
 
   // Channel at column 84, value at column 108
   oled.setCursor(84, y + 8);
+  if (hlCh) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
   oled.print(F("c"));
   if (cfg.channel < 10) oled.print(F(" "));
   oled.print(cfg.channel);
+  if (hlCh) oled.setTextColor(SSD1306_WHITE);
 
   oled.setCursor(108, y + 8);
   if (!st.plugged || st.lastSent == 0xFF) {
@@ -474,15 +643,26 @@ void updateDisplay() {
   oled.setCursor(0, 0);
   oled.print(F("Midi Expression"));
 
+  // Show "EDIT" indicator in top-right when editing
+  if (editField != EditField::NONE) {
+    oled.setCursor(102, 0);
+    oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    oled.print(F("EDIT"));
+    oled.setTextColor(SSD1306_WHITE);
+  }
+
   // Separator — dotted line at y=9
   for (uint8_t x = 0; x < OLED_WIDTH; x += 3) {
     oled.drawPixel(x, 9, SSD1306_WHITE);
   }
 
   // Three jack rows, each 16px tall (2 text lines of 8px)
-  drawJackRow(12, 1, j1State, j1Midi);
-  drawJackRow(30, 2, j2State, j2Midi);
-  drawJackRow(48, 3, j3State, j3Midi);
+  drawJackRow(12, 1, j1State, j1Midi,
+              editField == EditField::J1_CC, editField == EditField::J1_CH);
+  drawJackRow(30, 2, j2State, j2Midi,
+              editField == EditField::J2_CC, editField == EditField::J2_CH);
+  drawJackRow(48, 3, j3State, j3Midi,
+              editField == EditField::J3_CC, editField == EditField::J3_CH);
 
   oled.display();
 }
