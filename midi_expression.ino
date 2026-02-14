@@ -2,10 +2,11 @@
 // Teensy 4.1 (USB Type: "MIDI" in Arduino IDE / Tools menu)
 // Control Surface library by tttapa
 //
-// Three 6-pin switched 1/4" TRS sockets:
-//   J1 — Sustain  (Yamaha FC3A, expression)  CC 64  Channel 5
-//   J2 — Soft     (On Stage KSP, on/off)     CC 67  Channel 5
-//   J3 — Sostenuto(Casio SP20, on/off)       CC 66  Channel 5
+// Four 6-pin switched 1/4" TRS sockets (all expression-capable):
+//   J1 — Sustain   (CC 64)  Channel 5
+//   J2 — Soft      (CC 67)  Channel 5
+//   J3 — Sostenuto (CC 66)  Channel 5
+//   J4 — Pedal 4   (CC 11)  Channel 5
 //
 // 128x64 SSD1306 OLED on I2C (SDA=18, SCL=19) displays live status.
 // MIDI CC number and channel are runtime-configurable per jack
@@ -47,14 +48,20 @@ constexpr pin_t J1_TIP_PIN    = A0;  // pin 14 — analog, pedal wiper
 constexpr pin_t J1_RING_PIN   = A1;  // pin 15 — analog, VCC sense
 constexpr pin_t J1_DETECT_PIN = 0;   // pin 0  — S_s plug detect
 
-// J2 — expression-capable socket (Soft / On Stage KSP)
+// J2 — expression-capable socket (Soft)
 constexpr pin_t J2_TIP_PIN    = A2;  // pin 16 — analog, pedal wiper
 constexpr pin_t J2_RING_PIN   = A3;  // pin 17 — analog, VCC sense
 constexpr pin_t J2_DETECT_PIN = 1;   // pin 1  — S_s plug detect
 
-// J3 — digital-only socket (Sostenuto / Casio SP20)
-constexpr pin_t J3_TIP_PIN    = 2;   // pin 2  — digital, pedal input
+// J3 — expression-capable socket (Sostenuto)
+constexpr pin_t J3_TIP_PIN    = A6;  // pin 20 — analog, pedal wiper
+constexpr pin_t J3_RING_PIN   = A7;  // pin 21 — analog, VCC sense
 constexpr pin_t J3_DETECT_PIN = 3;   // pin 3  — S_s plug detect
+
+// J4 — expression-capable socket (Pedal 4)
+constexpr pin_t J4_TIP_PIN    = A8;  // pin 22 — analog, pedal wiper
+constexpr pin_t J4_RING_PIN   = A9;  // pin 23 — analog, VCC sense
+constexpr pin_t J4_DETECT_PIN = 7;   // pin 7  — S_s plug detect
 
 // KY-040 rotary encoder (active-LOW outputs, power from 3.3 V only)
 constexpr pin_t ENC_CLK_PIN = 4;   // encoder A phase
@@ -76,6 +83,8 @@ enum class WiperPin : uint8_t { TIP, RING };
 
 constexpr WiperPin J1_WIPER = WiperPin::RING;  // Yamaha FC3A: wiper on Ring
 constexpr WiperPin J2_WIPER = WiperPin::TIP;   // change to RING if needed
+constexpr WiperPin J3_WIPER = WiperPin::TIP;   // change to RING if needed
+constexpr WiperPin J4_WIPER = WiperPin::TIP;   // change to RING if needed
 
 // ---------------------------------------------------------------------------
 // CC name lookup — maps CC number to a short display name
@@ -120,9 +129,10 @@ struct JackMidiConfig {
 };
 
 // Defaults — edit these or change at runtime via the rotary encoder
-JackMidiConfig j1Midi = { 64, 5 };   // CC 64 Sustain,   Channel 5
-JackMidiConfig j2Midi = { 67, 5 };   // CC 67 Soft Pedal, Channel 5
-JackMidiConfig j3Midi = { 66, 5 };   // CC 66 Sostenuto,  Channel 5
+JackMidiConfig j1Midi = { 64, 5 };   // CC 64 Sustain,     Channel 5
+JackMidiConfig j2Midi = { 67, 5 };   // CC 67 Soft Pedal,  Channel 5
+JackMidiConfig j3Midi = { 66, 5 };   // CC 66 Sostenuto,   Channel 5
+JackMidiConfig j4Midi = { 11, 5 };   // CC 11 Expression,  Channel 5
 
 // Helper: build a MIDIAddress from a JackMidiConfig
 MIDIAddress midiAddr(const JackMidiConfig &cfg) {
@@ -142,7 +152,7 @@ constexpr unsigned long DISPLAY_INTERVAL_MS  = 100;   // OLED refresh rate (~10 
 // Rotary encoder — KY-040 for live MIDI parameter editing
 //
 // Push the button to cycle through editable fields:
-//   (off) → J1 CC → J1 Ch → J2 CC → J2 Ch → J3 CC → J3 Ch → (off)
+//   (off) → J1 CC → J1 Ch → J2 CC → J2 Ch → J3 CC → J3 Ch → J4 CC → J4 Ch → (off)
 // Rotate to change the selected value.  Edit mode auto-exits after
 // 10 seconds of inactivity.
 // ---------------------------------------------------------------------------
@@ -153,8 +163,9 @@ enum class EditField : uint8_t {
   J1_CC, J1_CH,
   J2_CC, J2_CH,
   J3_CC, J3_CH,
+  J4_CC, J4_CH,
 };
-constexpr uint8_t EDIT_FIELD_COUNT = 6;
+constexpr uint8_t EDIT_FIELD_COUNT = 8;
 
 EditField     editField        = EditField::NONE;
 unsigned long editLastActivity = 0;
@@ -187,7 +198,7 @@ struct JackState {
   uint8_t    lastSent      = 0xFF;    // last CC value sent (0xFF = none)
 };
 
-JackState j1State, j2State, j3State;
+JackState j1State, j2State, j3State, j4State;
 
 // ---------------------------------------------------------------------------
 // Dynamically constructed Control Surface elements
@@ -201,14 +212,20 @@ JackState j1State, j2State, j3State;
 // Aligned storage
 alignas(CCPotentiometer) uint8_t j1ExprBuf[sizeof(CCPotentiometer)];
 alignas(CCPotentiometer) uint8_t j2ExprBuf[sizeof(CCPotentiometer)];
+alignas(CCPotentiometer) uint8_t j3ExprBuf[sizeof(CCPotentiometer)];
+alignas(CCPotentiometer) uint8_t j4ExprBuf[sizeof(CCPotentiometer)];
 alignas(CCButton) uint8_t j1BtnBuf[sizeof(CCButton)];
 alignas(CCButton) uint8_t j2BtnBuf[sizeof(CCButton)];
 alignas(CCButton) uint8_t j3BtnBuf[sizeof(CCButton)];
+alignas(CCButton) uint8_t j4BtnBuf[sizeof(CCButton)];
 CCPotentiometer *j1Expr = nullptr;
 CCPotentiometer *j2Expr = nullptr;
+CCPotentiometer *j3Expr = nullptr;
+CCPotentiometer *j4Expr = nullptr;
 CCButton *j1Btn = nullptr;
 CCButton *j2Btn = nullptr;
 CCButton *j3Btn = nullptr;
+CCButton *j4Btn = nullptr;
 
 void createExpr(uint8_t *buf, CCPotentiometer *&ptr,
                 pin_t pin, const JackMidiConfig &cfg) {
@@ -239,17 +256,12 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           JackMidiConfig &cfg,
                           uint8_t *exprBuf, CCPotentiometer *&exprPtr,
                           uint8_t *btnBuf, CCButton *&btnPtr);
-void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                       JackMidiConfig &cfg,
-                       uint8_t *btnBuf, CCButton *&btnPtr);
 void handleEncoder();
 void applyEncoderChange(int steps);
 void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
                      WiperPin wiperCfg, JackMidiConfig &cfg,
                      uint8_t *exprBuf, CCPotentiometer *&exprPtr,
                      uint8_t *btnBuf, CCButton *&btnPtr);
-void rebuildDigitalJack(JackState &st, pin_t tipPin, JackMidiConfig &cfg,
-                        uint8_t *btnBuf, CCButton *&btnPtr);
 void updateDisplay();
 
 // ---------------------------------------------------------------------------
@@ -263,9 +275,7 @@ void setup() {
   pinMode(J1_DETECT_PIN, INPUT_PULLUP);
   pinMode(J2_DETECT_PIN, INPUT_PULLUP);
   pinMode(J3_DETECT_PIN, INPUT_PULLUP);
-
-  // J3 Tip — digital input with pull-up
-  pinMode(J3_TIP_PIN, INPUT_PULLUP);
+  pinMode(J4_DETECT_PIN, INPUT_PULLUP);
 
   // Encoder push-button (CLK & DT handled by Encoder library)
   pinMode(ENC_SW_PIN, INPUT_PULLUP);
@@ -308,8 +318,12 @@ void loop() {
     handleExpressionJack(j2State, J2_DETECT_PIN, J2_TIP_PIN, J2_RING_PIN,
                          J2_WIPER, j2Midi, j2ExprBuf, j2Expr,
                          j2BtnBuf, j2Btn);
-    handleDigitalJack(j3State, J3_DETECT_PIN, J3_TIP_PIN, j3Midi,
-                      j3BtnBuf, j3Btn);
+    handleExpressionJack(j3State, J3_DETECT_PIN, J3_TIP_PIN, J3_RING_PIN,
+                         J3_WIPER, j3Midi, j3ExprBuf, j3Expr,
+                         j3BtnBuf, j3Btn);
+    handleExpressionJack(j4State, J4_DETECT_PIN, J4_TIP_PIN, J4_RING_PIN,
+                         J4_WIPER, j4Midi, j4ExprBuf, j4Expr,
+                         j4BtnBuf, j4Btn);
   }
 
   // OLED refresh
@@ -339,10 +353,6 @@ PedalType classifyJack(pin_t sensePin, pin_t wiperPin) {
   if (senseAvg > RING_THRESHOLD) return PedalType::EXPRESSION;
   if (wiperAvg > RAIL_LOW && wiperAvg < RAIL_HIGH) return PedalType::EXPRESSION;
   return (wiperAvg < RAIL_LOW) ? PedalType::SWITCH_NC : PedalType::SWITCH_NO;
-}
-
-PedalType classifyDigitalJack(pin_t tipPin) {
-  return (digitalRead(tipPin) == LOW) ? PedalType::SWITCH_NC : PedalType::SWITCH_NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,51 +416,6 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
 }
 
 // ---------------------------------------------------------------------------
-// Handle the digital-only jack (J3)
-//
-// Always a switch → CCButton + invert() for NC
-// ---------------------------------------------------------------------------
-void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
-                       JackMidiConfig &cfg,
-                       uint8_t *btnBuf, CCButton *&btnPtr) {
-  unsigned long now = millis();
-  bool plugged = (digitalRead(detectPin) == HIGH);
-
-  if (plugged != st.wasPlugged) {
-    st.wasPlugged = plugged;
-    st.settleEnd = now + DEBOUNCE_SETTLE_MS;
-    st.plugged = false;
-    st.type = PedalType::UNKNOWN;
-    destroyBtn(btnPtr);
-    if (!plugged) {
-      Control_Surface.send(ControlChange, midiAddr(cfg), 0);
-      st.lastSent = 0;
-    }
-    return;
-  }
-
-  if (st.settleEnd != 0 && now < st.settleEnd) return;
-
-  if (st.settleEnd != 0) {
-    st.settleEnd = 0;
-    if (!plugged) { st.plugged = false; return; }
-    st.plugged = true;
-    pinMode(tipPin, INPUT_PULLUP);
-    delay(5);
-    st.type = classifyDigitalJack(tipPin);
-    createBtn(btnBuf, btnPtr, tipPin, cfg, st.type == PedalType::SWITCH_NC);
-  }
-
-  if (!st.plugged) return;
-
-  // Update lastSent for display
-  bool pressed = (st.type == PedalType::SWITCH_NC)
-                 ? (digitalRead(tipPin) == HIGH)
-                 : (digitalRead(tipPin) == LOW);
-  st.lastSent = pressed ? 0x7F : 0x00;
-}
-
-// ---------------------------------------------------------------------------
 // Rotary encoder — rebuild helpers & input handling
 // ---------------------------------------------------------------------------
 
@@ -469,13 +434,6 @@ void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
   }
 }
 
-void rebuildDigitalJack(JackState &st, pin_t tipPin, JackMidiConfig &cfg,
-                        uint8_t *btnBuf, CCButton *&btnPtr) {
-  if (!st.plugged) return;
-  destroyBtn(btnPtr);
-  createBtn(btnBuf, btnPtr, tipPin, cfg, st.type == PedalType::SWITCH_NC);
-}
-
 void applyEncoderChange(int steps) {
   JackMidiConfig *cfg = nullptr;
   bool isCC = false;
@@ -487,6 +445,8 @@ void applyEncoderChange(int steps) {
     case EditField::J2_CH: cfg = &j2Midi; isCC = false; break;
     case EditField::J3_CC: cfg = &j3Midi; isCC = true;  break;
     case EditField::J3_CH: cfg = &j3Midi; isCC = false; break;
+    case EditField::J4_CC: cfg = &j4Midi; isCC = true;  break;
+    case EditField::J4_CH: cfg = &j4Midi; isCC = false; break;
     default: return;
   }
 
@@ -520,7 +480,13 @@ void applyEncoderChange(int steps) {
       break;
     case EditField::J3_CC:
     case EditField::J3_CH:
-      rebuildDigitalJack(j3State, J3_TIP_PIN, j3Midi, j3BtnBuf, j3Btn);
+      rebuildExprJack(j3State, J3_TIP_PIN, J3_RING_PIN, J3_WIPER,
+                      j3Midi, j3ExprBuf, j3Expr, j3BtnBuf, j3Btn);
+      break;
+    case EditField::J4_CC:
+    case EditField::J4_CH:
+      rebuildExprJack(j4State, J4_TIP_PIN, J4_RING_PIN, J4_WIPER,
+                      j4Midi, j4ExprBuf, j4Expr, j4BtnBuf, j4Btn);
       break;
     default: break;
   }
@@ -565,18 +531,19 @@ void handleEncoder() {
 }
 
 // ---------------------------------------------------------------------------
-// OLED display — draw live status for all three jacks
+// OLED display — draw live status for all four jacks
 //
-// Layout (128x64, 6x8 font = 21 chars x 8 rows):
+// Layout (128x64, 6x8 font = 21 chars x 8 rows, compact 14-pixel spacing):
 //
-//   Row 0:  "Midi Expression"           (header)
-//   Row 1:  ────────────────────         (separator)
-//   Row 2:  J1: Plugged  TRS            (status)
-//   Row 3:      CC64 Sustain  ch5  127  (midi info + value)
-//   Row 4:  J2: Unplugged               (status)
-//   Row 5:      CC67 SoftPedl ch5  ---  (midi info)
-//   Row 6:  J3: Plugged  TS             (status)
-//   Row 7:      CC66 Sostnuto ch5  127  (midi info + value)
+//   Row 0:  "Midi Expression"           (header, y=0-7)
+//   Jack 1:  J1: In TRS Expr            (y=8-15, status)
+//            CC64 Sustain  ch5  127     (y=16-21, midi info + value)
+//   Jack 2:  J2: Unplugged              (y=22-29, status)
+//            CC67 SoftPedl ch5  ---     (y=30-35, midi info)
+//   Jack 3:  J3: In TRS Expr            (y=36-43, status)
+//            CC66 Sostnuto ch5  127     (y=44-49, midi info + value)
+//   Jack 4:  J4: In TRS Expr            (y=50-57, status)
+//            CC11 Express  ch5  127     (y=58-63, midi info + value)
 // ---------------------------------------------------------------------------
 
 void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
@@ -651,18 +618,15 @@ void updateDisplay() {
     oled.setTextColor(SSD1306_WHITE);
   }
 
-  // Separator — dotted line at y=9
-  for (uint8_t x = 0; x < OLED_WIDTH; x += 3) {
-    oled.drawPixel(x, 9, SSD1306_WHITE);
-  }
-
-  // Three jack rows, each 16px tall (2 text lines of 8px)
-  drawJackRow(12, 1, j1State, j1Midi,
+  // Four jack rows, each 14px tall (2 text lines with compact spacing)
+  drawJackRow(8, 1, j1State, j1Midi,
               editField == EditField::J1_CC, editField == EditField::J1_CH);
-  drawJackRow(30, 2, j2State, j2Midi,
+  drawJackRow(22, 2, j2State, j2Midi,
               editField == EditField::J2_CC, editField == EditField::J2_CH);
-  drawJackRow(48, 3, j3State, j3Midi,
+  drawJackRow(36, 3, j3State, j3Midi,
               editField == EditField::J3_CC, editField == EditField::J3_CH);
+  drawJackRow(50, 4, j4State, j4Midi,
+              editField == EditField::J4_CC, editField == EditField::J4_CH);
 
   oled.display();
 }

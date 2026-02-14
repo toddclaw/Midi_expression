@@ -39,9 +39,15 @@ J2      R     A3       17       Expression VCC / pedal sense   Analog input
 J2      S     GND      —        Sleeve ground                  —
 J2      S_s   1        1        Plug-detect                    INPUT_PULLUP
 
-J3      T     2        2        On/off pedal input             INPUT_PULLUP
+J3      T     A6       20       Expression / pedal wiper       Analog input
+J3      R     A7       21       Expression VCC / pedal sense   Analog input
 J3      S     GND      —        Sleeve ground                  —
 J3      S_s   3        3        Plug-detect                    INPUT_PULLUP
+
+J4      T     A8       22       Expression / pedal wiper       Analog input
+J4      R     A9       23       Expression VCC / pedal sense   Analog input
+J4      S     GND      —        Sleeve ground                  —
+J4      S_s   7        7        Plug-detect                    INPUT_PULLUP
 
 OLED    SDA   SDA      18       SSD1306 I2C data               I2C (Wire)
 OLED    SCL   SCL      19       SSD1306 I2C clock              I2C (Wire)
@@ -55,9 +61,9 @@ ENC     +     3.3V     —        Encoder power (3.3 V only!)    —
 ENC     GND   GND      —        Encoder ground                 —
 ```
 
-Four of the Teensy 4.1's 18 analog channels (A0–A3) are used by J1 and J2,
-giving both sockets full expression-pedal capability while also supporting
-simple on/off pedals.
+Eight of the Teensy 4.1's analog channels (A0–A3, A6–A9) are used by the
+four jacks, giving all sockets full expression-pedal capability while also
+supporting simple on/off switch pedals.
 
 ---
 
@@ -67,22 +73,29 @@ simple on/off pedals.
 Ref   Value           Qty  Description
 ────  ──────────────  ───  ──────────────────────────────────────────────────
 U1    Teensy 4.1       1   Microcontroller (iMXRT1062, USB Micro-B)
-J1    6-pin sw. TRS    1   1/4" socket — Sustain pedal (Yamaha FC3A)
-J2    6-pin sw. TRS    1   1/4" socket — Soft pedal (On Stage KSP)
-J3    6-pin sw. TRS    1   1/4" socket — Sostenuto pedal (Casio SP20)
+J1    6-pin sw. TRS    1   1/4" socket — Sustain pedal (expression-capable)
+J2    6-pin sw. TRS    1   1/4" socket — Soft pedal (expression-capable)
+J3    6-pin sw. TRS    1   1/4" socket — Sostenuto pedal (expression-capable)
+J4    6-pin sw. TRS    1   1/4" socket — Pedal 4 (expression-capable)
 R1    1 kΩ             1   J1 Tip series protection / LPF
 R2    100 Ω            1   J1 Ring series — VCC current limit + TS protection
 R3    1 kΩ             1   J2 Tip series protection / LPF
 R4    100 Ω            1   J2 Ring series — VCC current limit + TS protection
-R5    1 kΩ             1   J3 Tip series protection
+R5    1 kΩ             1   J3 Tip series protection / LPF
+R6    100 Ω            1   J3 Ring series — VCC current limit + TS protection
+R7    1 kΩ             1   J4 Tip series protection / LPF
+R8    100 Ω            1   J4 Ring series — VCC current limit + TS protection
 OLED  SSD1306 128x64   1   0.96" I2C OLED display (addr 0x3C)
 ENC   KY-040           1   360° rotary encoder module with push-button
 C1    100 nF ceramic   1   J1 Tip analog smoothing  (LPF with R1, fc ≈ 1.6 kHz)
 C2    100 nF ceramic   1   J1 Ring analog smoothing (LPF with R2, fc ≈ 11 kHz)
 C3    100 nF ceramic   1   J2 Tip analog smoothing  (LPF with R3, fc ≈ 1.6 kHz)
 C4    100 nF ceramic   1   J2 Ring analog smoothing (LPF with R4, fc ≈ 11 kHz)
-C5    100 nF ceramic   1   J3 Tip debounce
-C6    100 nF ceramic   1   3.3 V supply rail decoupling (near jacks)
+C5    100 nF ceramic   1   J3 Tip analog smoothing  (LPF with R5, fc ≈ 1.6 kHz)
+C6    100 nF ceramic   1   J3 Ring analog smoothing (LPF with R6, fc ≈ 11 kHz)
+C7    100 nF ceramic   1   J4 Tip analog smoothing  (LPF with R7, fc ≈ 1.6 kHz)
+C8    100 nF ceramic   1   J4 Ring analog smoothing (LPF with R8, fc ≈ 11 kHz)
+C9    100 nF ceramic   1   3.3 V supply rail decoupling (near jacks)
 ```
 
 ---
@@ -181,27 +194,32 @@ R1→R3, C1→C3, A0→A2 (pin 16), R2→R4, C2→C4, A1→A3 (pin 17), pin 0→
 
 ---
 
-## Circuit — J3  (Digital-Only Socket)
+## Circuit — J3  (Expression-Capable Socket)
 
-Default assignment: **Sostenuto pedal — Casio SP20**
+Default assignment: **Sostenuto pedal — CC 66**
 
-The Casio SP20 is a sustain-type switch pedal (TS plug). Only the
-Tip signal is read; Ring is unused.
+Identical topology to J1 and J2 but on A6/A7. Supports both expression pedals
+and on/off switches.
 
 ```
                     6-pin Switched
                     TRS Jack (J3)                        Teensy 4.1
                    ┌────────────┐                       ┌──────────┐
                    │            │  R5 [1 kΩ]            │          │
-            T   ●──┤            ├────┤├────┬─────────── ┤ pin 2    │
-                   │            │          │             │          │
+            T   ●──┤            ├────┤├────┬─────────── ┤ A6       │
+                   │            │          │             │ (pin 20) │
                    │            │         C5 [100 nF]    │          │
                    │            │          │             │          │
                    │            │         GND            │          │
                    │            │                        │          │
-          T_s   ●──┤            ├──── GND                │          │
+                   │            │  R6 [100 Ω]            │          │
+            R   ●──┤            ├────┤├────┬─────────── ┤ A7       │
+                   │            │          │             │ (pin 21) │
+                   │            │         C6 [100 nF]    │          │
+                   │            │          │             │          │
+                   │            │         GND            │          │
                    │            │                        │          │
-            R   ●──┤            ├──── NC                 │          │
+          T_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
           R_s   ●──┤            ├──── NC                 │          │
                    │            │                        │          │
@@ -214,14 +232,51 @@ Tip signal is read; Ring is unused.
 
 ### J3 Wiring Notes
 
-| Jack pin | Connection | Purpose |
-|----------|------------|---------|
-| T        | → R5 (1 kΩ) → pin 2 (INPUT_PULLUP), with C5 (100 nF) to GND | Reads pedal switch state. Pull-up reads HIGH when open, LOW when closed. R5 limits hot-plug current; R5 + C5 debounce the switch. |
-| T_s      | → GND | Grounds the input when no plug is inserted, so pin 2 reads a stable LOW instead of floating. |
-| R        | → NC | Not used. |
-| R_s      | → NC | Not used. |
-| S        | → GND | Common ground. |
-| S_s      | → pin 3 (INPUT_PULLUP) | **Plug detect.** Same logic as J1/J2: LOW = empty, HIGH = plug present. |
+Same topology as J1/J2 — see the J1 wiring table above. Substitute:
+R1→R5, C1→C5, A0→A6 (pin 20), R2→R6, C2→C6, A1→A7 (pin 21), pin 0→pin 3.
+
+---
+
+## Circuit — J4  (Expression-Capable Socket)
+
+Default assignment: **Pedal 4 — CC 11 (Expression)**
+
+Identical topology to J1/J2/J3 but on A8/A9. Supports both expression pedals
+and on/off switches.
+
+```
+                    6-pin Switched
+                    TRS Jack (J4)                        Teensy 4.1
+                   ┌────────────┐                       ┌──────────┐
+                   │            │  R7 [1 kΩ]            │          │
+            T   ●──┤            ├────┤├────┬─────────── ┤ A8       │
+                   │            │          │             │ (pin 22) │
+                   │            │         C7 [100 nF]    │          │
+                   │            │          │             │          │
+                   │            │         GND            │          │
+                   │            │                        │          │
+                   │            │  R8 [100 Ω]            │          │
+            R   ●──┤            ├────┤├────┬─────────── ┤ A9       │
+                   │            │          │             │ (pin 23) │
+                   │            │         C8 [100 nF]    │          │
+                   │            │          │             │          │
+                   │            │         GND            │          │
+                   │            │                        │          │
+          T_s   ●──┤            ├──── GND                │          │
+                   │            │                        │          │
+          R_s   ●──┤            ├──── NC                 │          │
+                   │            │                        │          │
+            S   ●──┤            ├──── GND                │          │
+                   │            │                        │          │
+          S_s   ●──┤            ├─────────────────────── ┤ pin 7    │
+                   │            │                        │          │
+                   └────────────┘                        └──────────┘
+```
+
+### J4 Wiring Notes
+
+Same topology as J1/J2/J3 — see the J1 wiring table above. Substitute:
+R1→R7, C1→C7, A0→A8 (pin 22), R2→R8, C2→C8, A1→A9 (pin 23), pin 0→pin 7.
 
 ---
 
@@ -279,17 +334,26 @@ and DT wires.
   J1.S ──────────── GND   │              │  Sleeve ground
   J1.S_s ─────────────────┤ pin 0        │  J1 plug detect
                            │              │
-  J2.T  ── R3 [1kΩ] ──┬──┤ A2  (pin 16) │  Soft pedal (On Stage KSP)
+  J2.T  ── R3 [1kΩ] ──┬──┤ A2  (pin 16) │  Soft pedal (expression-capable)
                     C3 ─┘  │              │
   J2.R  ── R4 [100Ω]──┬──┤ A3  (pin 17) │
                     C4 ─┘  │              │
   J2.S ──────────── GND   │              │  Sleeve ground
   J2.S_s ─────────────────┤ pin 1        │  J2 plug detect
                            │              │
-  J3.T  ── R5 [1kΩ] ──┬──┤ pin 2        │  Sostenuto pedal (Casio SP20)
+  J3.T  ── R5 [1kΩ] ──┬──┤ A6  (pin 20) │  Sostenuto pedal (expression-capable)
                     C5 ─┘  │              │
+  J3.R  ── R6 [100Ω]──┬──┤ A7  (pin 21) │
+                    C6 ─┘  │              │
   J3.S ──────────── GND   │              │  Sleeve ground
   J3.S_s ─────────────────┤ pin 3        │  J3 plug detect
+                           │              │
+  J4.T  ── R7 [1kΩ] ──┬──┤ A8  (pin 22) │  Pedal 4 (expression-capable)
+                    C7 ─┘  │              │
+  J4.R  ── R8 [100Ω]──┬──┤ A9  (pin 23) │
+                    C8 ─┘  │              │
+  J4.S ──────────── GND   │              │  Sleeve ground
+  J4.S_s ─────────────────┤ pin 7        │  J4 plug detect
                            │              │
   OLED SDA ────────────────┤ SDA (pin 18) │  SSD1306 I2C data
   OLED SCL ────────────────┤ SCL (pin 19) │  SSD1306 I2C clock
@@ -302,13 +366,13 @@ and DT wires.
   ENC +   ──── 3.3V        │              │
   ENC GND ──── GND         │              │
                            │              │
-              C6 ── 3V3 ──┤ 3.3V         │
+              C9 ── 3V3 ──┤ 3.3V         │
               │            │              │
              GND ─────────┤ GND          │
                            └──────────────┘
 
   All T_s pins ──── GND    (ground analog/digital inputs when unplugged)
-  J1.R_s, J2.R_s, J3.R, J3.R_s ──── NC
+  J1.R_s, J2.R_s, J3.R_s, J4.R_s ──── NC
 ```
 
 ---
@@ -387,7 +451,9 @@ can distinguish pedal types at runtime:
 - The Teensy 4.1 has two 12-bit ADCs (use `analogReadResolution(12)` for
   0–4095 range). The analog reference is fixed at 3.3 V.
 - All GPIO is 3.3 V — the Teensy 4.1 is **not** 5 V tolerant.
-- C6 (100 nF decoupling) should be placed physically close to the
+- C9 (100 nF decoupling) should be placed physically close to the
   jack cluster, between the 3.3 V rail and ground.
 - The enclosure should be labeled to identify each socket:
-  **J1** = Sustain (expression), **J2** = Soft, **J3** = Sostenuto.
+  **J1** = Sustain, **J2** = Soft, **J3** = Sostenuto, **J4** = Expression.
+- All four jacks are expression-capable and auto-detect pedal type (TRS expression
+  vs TS switch, NO vs NC polarity).
