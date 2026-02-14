@@ -23,7 +23,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <new>  // placement new
-#include <Encoder.h>  // PJRC Encoder library (bundled with Teensyduino)
 
 // ---------------------------------------------------------------------------
 // MIDI interface — Teensy native USB MIDI
@@ -156,8 +155,6 @@ constexpr unsigned long DISPLAY_INTERVAL_MS  = 100;   // OLED refresh rate (~10 
 // Rotate to change the selected value.  Edit mode auto-exits after
 // 10 seconds of inactivity.
 // ---------------------------------------------------------------------------
-Encoder encoder(ENC_CLK_PIN, ENC_DT_PIN);
-
 enum class EditField : uint8_t {
   NONE,
   J1_CC, J1_CH,
@@ -176,9 +173,11 @@ bool          encBtnLast       = HIGH;
 unsigned long encBtnDebounce   = 0;
 constexpr unsigned long ENC_BTN_DEBOUNCE_MS = 50;
 
-// Rotation tracking
-long encLastPos = 0;
-constexpr int ENC_COUNTS_PER_DETENT = 4;  // KY-040 with PJRC Encoder lib
+// Encoder position (direct reading — no external library needed)
+long     encPosition = 0;
+bool     encClkLast  = HIGH;
+long     encLastPos  = 0;
+constexpr int ENC_COUNTS_PER_DETENT = 1;  // one count per click with direct read
 
 // ---------------------------------------------------------------------------
 // Per-jack runtime state
@@ -256,6 +255,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           JackMidiConfig &cfg,
                           uint8_t *exprBuf, CCPotentiometer *&exprPtr,
                           uint8_t *btnBuf, CCButton *&btnPtr);
+void updateEncoderPosition();
 void handleEncoder();
 void applyEncoderChange(int steps);
 void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
@@ -277,8 +277,10 @@ void setup() {
   pinMode(J3_DETECT_PIN, INPUT_PULLUP);
   pinMode(J4_DETECT_PIN, INPUT_PULLUP);
 
-  // Encoder push-button (CLK & DT handled by Encoder library)
-  pinMode(ENC_SW_PIN, INPUT_PULLUP);
+  // Encoder pins
+  pinMode(ENC_CLK_PIN, INPUT_PULLUP);
+  pinMode(ENC_DT_PIN,  INPUT_PULLUP);
+  pinMode(ENC_SW_PIN,  INPUT_PULLUP);
 
   // OLED init
   Wire.begin();
@@ -380,7 +382,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     destroyExpr(exprPtr);
     destroyBtn(btnPtr);
     if (!plugged) {
-      Control_Surface.send(ControlChange, midiAddr(cfg), 0);
+      midi.sendCC(midiAddr(cfg), 0);
       st.lastSent = 0;
     }
     return;
@@ -464,7 +466,7 @@ void applyEncoderChange(int steps) {
   if (cfg->cc == oldCC && cfg->channel == oldCh) return;
 
   // Zero the old CC so the host doesn't see a stuck controller
-  Control_Surface.send(ControlChange, {oldCC, Channel(oldCh - 1)}, 0);
+  midi.sendCC({oldCC, Channel(oldCh - 1)}, 0);
 
   // Rebuild the active Control Surface object with the new address
   switch (editField) {
@@ -492,8 +494,23 @@ void applyEncoderChange(int steps) {
   }
 }
 
+// Read encoder pins — call every loop iteration.
+// Counts one step per detent (falling edge of CLK).
+void updateEncoderPosition() {
+  bool clk = digitalRead(ENC_CLK_PIN);
+  if (clk != encClkLast) {
+    encClkLast = clk;
+    if (clk == LOW) {  // falling edge
+      encPosition += (digitalRead(ENC_DT_PIN) == HIGH) ? 1 : -1;
+    }
+  }
+}
+
 void handleEncoder() {
   unsigned long now = millis();
+
+  // Sample the encoder pins first
+  updateEncoderPosition();
 
   // --- Button: cycle through editable fields ---
   bool btn = digitalRead(ENC_SW_PIN);
@@ -505,7 +522,7 @@ void handleEncoder() {
       uint8_t f = static_cast<uint8_t>(editField) + 1;
       if (f > EDIT_FIELD_COUNT) f = 0;
       editField = static_cast<EditField>(f);
-      encLastPos = encoder.read();  // reset baseline on field change
+      encLastPos = encPosition;  // reset baseline on field change
     }
   }
 
@@ -519,8 +536,7 @@ void handleEncoder() {
   if (editField == EditField::NONE) return;
 
   // --- Rotation: change selected value ---
-  long pos = encoder.read();
-  long diff = pos - encLastPos;
+  long diff = encPosition - encLastPos;
   if (abs(diff) < ENC_COUNTS_PER_DETENT) return;
 
   int steps = diff / ENC_COUNTS_PER_DETENT;
