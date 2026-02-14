@@ -1,7 +1,8 @@
 // Midi Expression — Minimal test sketch
 // Teensy 4.1 (USB Type: "MIDI" in Arduino IDE / Tools menu)
 //
-// Single expression pedal on J1 → CC 64 (Sustain) on Channel 5.
+// Single expression pedal on J1 — Yamaha FC3A (wiper on Ring = A1)
+// Sends CC 64 (Sustain) on Channel 5.
 // No plug detection, no TS/TRS classification — just reads the pot
 // and sends MIDI.
 
@@ -9,7 +10,7 @@
 
 USBMIDI_Interface midi;
 
-CCPotentiometer sustain {A0, {MIDI_CC::Damper_Pedal, Channel_5}};
+CCPotentiometer sustain {A1, {MIDI_CC::Damper_Pedal, Channel_5}};
 
 void setup() {
   analogReadResolution(12);
