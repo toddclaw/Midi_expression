@@ -10,13 +10,24 @@
 
 USBMIDI_Interface midi;
 
-CCPotentiometer sustain {A1, {MIDI_CC::Damper_Pedal, Channel_5}};
+//CCPotentiometer sustain {A1, {MIDI_CC::Damper_Pedal, Channel_5}, {0, 1023, 127, 0}};
+
+// We define a filtered analog input that sends CC messages
+// PBPotentiometer is often more "stable" for the compiler than the raw Analog template
+CCPotentiometer pedal = {
+  A1,
+  {64, Channel_5}
+};
 
 void setup() {
+  pinMode(A0, OUTPUT);
+  digitalWrite(A0, HIGH);
   analogReadResolution(12);
   Control_Surface.begin();
-}
+  pedal.invert();
+  }
 
 void loop() {
   Control_Surface.loop();
+
 }
