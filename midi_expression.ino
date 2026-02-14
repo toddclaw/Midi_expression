@@ -370,7 +370,7 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     destroyExpr(exprPtr);
     destroyBtn(btnPtr);
     if (!plugged) {
-      midi.sendControlChange(midiAddr(cfg), 0);
+      Control_Surface.send(ControlChange, midiAddr(cfg), 0);
       st.lastSent = 0;
     }
     return;
@@ -423,7 +423,7 @@ void handleDigitalJack(JackState &st, pin_t detectPin, pin_t tipPin,
     st.type = PedalType::UNKNOWN;
     destroyBtn(btnPtr);
     if (!plugged) {
-      midi.sendControlChange(midiAddr(cfg), 0);
+      Control_Surface.send(ControlChange, midiAddr(cfg), 0);
       st.lastSent = 0;
     }
     return;
@@ -504,7 +504,7 @@ void applyEncoderChange(int steps) {
   if (cfg->cc == oldCC && cfg->channel == oldCh) return;
 
   // Zero the old CC so the host doesn't see a stuck controller
-  midi.sendControlChange({oldCC, Channel(oldCh - 1)}, 0);
+  Control_Surface.send(ControlChange, {oldCC, Channel(oldCh - 1)}, 0);
 
   // Rebuild the active Control Surface object with the new address
   switch (editField) {
