@@ -23,6 +23,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Encoder.h>
+#include <EEPROM.h>
 #include <new>  // placement new
 
 // ---------------------------------------------------------------------------
@@ -126,17 +127,54 @@ const char *ccName(uint8_t cc) {
 struct JackMidiConfig {
   uint8_t cc;       // CC number (0–127)
   uint8_t channel;  // MIDI channel (1–16, stored as 1-based for display)
+  bool    inverted; // Invert expression pedal output (127→0, 0→127)
 };
 
 // Defaults — edit these or change at runtime via the rotary encoder
-JackMidiConfig j1Midi = { 64, 5 };   // CC 64 Sustain,     Channel 5
-JackMidiConfig j2Midi = { 67, 5 };   // CC 67 Soft Pedal,  Channel 5
-JackMidiConfig j3Midi = { 66, 5 };   // CC 66 Sostenuto,   Channel 5
-JackMidiConfig j4Midi = { 11, 5 };   // CC 11 Expression,  Channel 5
+JackMidiConfig j1Midi = { 64, 5, false };   // CC 64 Sustain,     Channel 5
+JackMidiConfig j2Midi = { 67, 5, false };   // CC 67 Soft Pedal,  Channel 5
+JackMidiConfig j3Midi = { 66, 5, false };   // CC 66 Sostenuto,   Channel 5
+JackMidiConfig j4Midi = { 11, 5, false };   // CC 11 Expression,  Channel 5
 
 // Helper: build a MIDIAddress from a JackMidiConfig
 MIDIAddress midiAddr(const JackMidiConfig &cfg) {
   return {cfg.cc, Channel(cfg.channel - 1)};
+}
+
+// ---------------------------------------------------------------------------
+// EEPROM persistence — save/load configuration
+// ---------------------------------------------------------------------------
+constexpr uint16_t EEPROM_MAGIC = 0xABCD;  // sentinel for valid config
+constexpr uint16_t EEPROM_ADDR  = 0;       // start address in EEPROM
+
+struct EEPROMConfig {
+  uint16_t       magic;
+  JackMidiConfig j1;
+  JackMidiConfig j2;
+  JackMidiConfig j3;
+  JackMidiConfig j4;
+};
+
+void saveConfig() {
+  EEPROMConfig cfg;
+  cfg.magic = EEPROM_MAGIC;
+  cfg.j1 = j1Midi;
+  cfg.j2 = j2Midi;
+  cfg.j3 = j3Midi;
+  cfg.j4 = j4Midi;
+  EEPROM.put(EEPROM_ADDR, cfg);
+}
+
+void loadConfig() {
+  EEPROMConfig cfg;
+  EEPROM.get(EEPROM_ADDR, cfg);
+  if (cfg.magic == EEPROM_MAGIC) {
+    j1Midi = cfg.j1;
+    j2Midi = cfg.j2;
+    j3Midi = cfg.j3;
+    j4Midi = cfg.j4;
+  }
+  // If magic doesn't match, keep defaults
 }
 
 // ---------------------------------------------------------------------------
@@ -152,18 +190,19 @@ constexpr unsigned long DISPLAY_INTERVAL_MS  = 100;   // OLED refresh rate (~10 
 // Rotary encoder — KY-040 for live MIDI parameter editing
 //
 // Push the button to cycle through editable fields:
-//   (off) → J1 CC → J1 Ch → J2 CC → J2 Ch → J3 CC → J3 Ch → J4 CC → J4 Ch → (off)
+//   (off) → J1 CC → J1 Ch → J1 Inv → J2 CC → J2 Ch → J2 Inv →
+//           J3 CC → J3 Ch → J3 Inv → J4 CC → J4 Ch → J4 Inv → (off)
 // Rotate to change the selected value.  Edit mode auto-exits after
 // 10 seconds of inactivity.
 // ---------------------------------------------------------------------------
 enum class EditField : uint8_t {
   NONE,
-  J1_CC, J1_CH,
-  J2_CC, J2_CH,
-  J3_CC, J3_CH,
-  J4_CC, J4_CH,
+  J1_CC, J1_CH, J1_INV,
+  J2_CC, J2_CH, J2_INV,
+  J3_CC, J3_CH, J3_INV,
+  J4_CC, J4_CH, J4_INV,
 };
-constexpr uint8_t EDIT_FIELD_COUNT = 8;
+constexpr uint8_t EDIT_FIELD_COUNT = 12;
 
 EditField     editField        = EditField::NONE;
 unsigned long editLastActivity = 0;
@@ -230,6 +269,7 @@ void createExpr(uint8_t *buf, CCPotentiometer *&ptr,
                 pin_t pin, const JackMidiConfig &cfg) {
   ptr = new (buf) CCPotentiometer(pin, midiAddr(cfg));
   ptr->begin();
+  if (cfg.inverted) ptr->invert();
 }
 
 void destroyExpr(CCPotentiometer *&ptr) {
@@ -269,6 +309,9 @@ void updateDisplay();
 void setup() {
   // 12-bit ADC for finer expression control
   analogReadResolution(12);
+
+  // Load saved configuration from EEPROM
+  loadConfig();
 
   // Plug-detect pins — INPUT_PULLUP (S_s pins)
   pinMode(J1_DETECT_PIN, INPUT_PULLUP);
@@ -435,55 +478,73 @@ void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
 
 void applyEncoderChange(int steps) {
   JackMidiConfig *cfg = nullptr;
-  bool isCC = false;
+  enum FieldType { CC, CH, INV } fieldType;
 
   switch (editField) {
-    case EditField::J1_CC: cfg = &j1Midi; isCC = true;  break;
-    case EditField::J1_CH: cfg = &j1Midi; isCC = false; break;
-    case EditField::J2_CC: cfg = &j2Midi; isCC = true;  break;
-    case EditField::J2_CH: cfg = &j2Midi; isCC = false; break;
-    case EditField::J3_CC: cfg = &j3Midi; isCC = true;  break;
-    case EditField::J3_CH: cfg = &j3Midi; isCC = false; break;
-    case EditField::J4_CC: cfg = &j4Midi; isCC = true;  break;
-    case EditField::J4_CH: cfg = &j4Midi; isCC = false; break;
+    case EditField::J1_CC:  cfg = &j1Midi; fieldType = CC;  break;
+    case EditField::J1_CH:  cfg = &j1Midi; fieldType = CH;  break;
+    case EditField::J1_INV: cfg = &j1Midi; fieldType = INV; break;
+    case EditField::J2_CC:  cfg = &j2Midi; fieldType = CC;  break;
+    case EditField::J2_CH:  cfg = &j2Midi; fieldType = CH;  break;
+    case EditField::J2_INV: cfg = &j2Midi; fieldType = INV; break;
+    case EditField::J3_CC:  cfg = &j3Midi; fieldType = CC;  break;
+    case EditField::J3_CH:  cfg = &j3Midi; fieldType = CH;  break;
+    case EditField::J3_INV: cfg = &j3Midi; fieldType = INV; break;
+    case EditField::J4_CC:  cfg = &j4Midi; fieldType = CC;  break;
+    case EditField::J4_CH:  cfg = &j4Midi; fieldType = CH;  break;
+    case EditField::J4_INV: cfg = &j4Midi; fieldType = INV; break;
     default: return;
   }
 
-  uint8_t oldCC = cfg->cc;
-  uint8_t oldCh = cfg->channel;
+  uint8_t oldCC  = cfg->cc;
+  uint8_t oldCh  = cfg->channel;
+  bool    oldInv = cfg->inverted;
 
-  if (isCC) {
+  if (fieldType == CC) {
     int v = (int)cfg->cc + steps;
     cfg->cc = constrain(v, 0, 127);
-  } else {
+  } else if (fieldType == CH) {
     int v = (int)cfg->channel + steps;
     cfg->channel = constrain(v, 1, 16);
+  } else {  // INV — toggle on any rotation
+    cfg->inverted = !cfg->inverted;
   }
 
-  if (cfg->cc == oldCC && cfg->channel == oldCh) return;
+  // Save to EEPROM whenever a change is made
+  if (cfg->cc != oldCC || cfg->channel != oldCh || cfg->inverted != oldInv) {
+    saveConfig();
+  }
+
+  if (cfg->cc == oldCC && cfg->channel == oldCh && cfg->inverted == oldInv) return;
 
   // Zero the old CC so the host doesn't see a stuck controller
-  midi.sendCC({oldCC, Channel(oldCh - 1)}, 0);
+  if (cfg->cc != oldCC || cfg->channel != oldCh) {
+    midi.sendCC({oldCC, Channel(oldCh - 1)}, 0);
+  }
 
-  // Rebuild the active Control Surface object with the new address
+  // Rebuild the active Control Surface object with the new settings
   switch (editField) {
     case EditField::J1_CC:
     case EditField::J1_CH:
+    case EditField::J1_INV:
       rebuildExprJack(j1State, J1_TIP_PIN, J1_RING_PIN, J1_WIPER,
                       j1Midi, j1ExprBuf, j1Expr, j1BtnBuf, j1Btn);
       break;
     case EditField::J2_CC:
     case EditField::J2_CH:
+    case EditField::J2_INV:
       rebuildExprJack(j2State, J2_TIP_PIN, J2_RING_PIN, J2_WIPER,
                       j2Midi, j2ExprBuf, j2Expr, j2BtnBuf, j2Btn);
       break;
     case EditField::J3_CC:
     case EditField::J3_CH:
+    case EditField::J3_INV:
       rebuildExprJack(j3State, J3_TIP_PIN, J3_RING_PIN, J3_WIPER,
                       j3Midi, j3ExprBuf, j3Expr, j3BtnBuf, j3Btn);
       break;
     case EditField::J4_CC:
     case EditField::J4_CH:
+    case EditField::J4_INV:
       rebuildExprJack(j4State, J4_TIP_PIN, J4_RING_PIN, J4_WIPER,
                       j4Midi, j4ExprBuf, j4Expr, j4BtnBuf, j4Btn);
       break;
@@ -548,8 +609,8 @@ void handleEncoder() {
 // ---------------------------------------------------------------------------
 
 void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
-                 const JackMidiConfig &cfg, bool hlCC, bool hlCh) {
-  // Line 1: "Jn: In TRS Expr" or "Jn: Unplugged"
+                 const JackMidiConfig &cfg, bool hlCC, bool hlCh, bool hlInv) {
+  // Line 1: "Jn: In TRS Expr" or "Jn: Unplugged" + optional "I" for inverted
   oled.setCursor(0, y);
   oled.print(F("J"));
   oled.print(jackNum);
@@ -565,6 +626,14 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
       case PedalType::SWITCH_NC:  oled.print(F("TS  NC"));   break;
       default:                    oled.print(F("..."));       break;
     }
+  }
+
+  // Show "I" indicator at end of line if inverted
+  if (cfg.inverted && st.type == PedalType::EXPRESSION) {
+    oled.setCursor(114, y);
+    if (hlInv) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    oled.print(F("I"));
+    if (hlInv) oled.setTextColor(SSD1306_WHITE);
   }
 
   // Line 2: "  CC 64 Sustain  c 5  127"
@@ -621,13 +690,17 @@ void updateDisplay() {
 
   // Four jack rows, each 14px tall (2 text lines with compact spacing)
   drawJackRow(8, 1, j1State, j1Midi,
-              editField == EditField::J1_CC, editField == EditField::J1_CH);
+              editField == EditField::J1_CC, editField == EditField::J1_CH,
+              editField == EditField::J1_INV);
   drawJackRow(22, 2, j2State, j2Midi,
-              editField == EditField::J2_CC, editField == EditField::J2_CH);
+              editField == EditField::J2_CC, editField == EditField::J2_CH,
+              editField == EditField::J2_INV);
   drawJackRow(36, 3, j3State, j3Midi,
-              editField == EditField::J3_CC, editField == EditField::J3_CH);
+              editField == EditField::J3_CC, editField == EditField::J3_CH,
+              editField == EditField::J3_INV);
   drawJackRow(50, 4, j4State, j4Midi,
-              editField == EditField::J4_CC, editField == EditField::J4_CH);
+              editField == EditField::J4_CC, editField == EditField::J4_CH,
+              editField == EditField::J4_INV);
 
   oled.display();
 }
