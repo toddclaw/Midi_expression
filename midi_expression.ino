@@ -22,6 +22,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Encoder.h>
 #include <new>  // placement new
 
 // ---------------------------------------------------------------------------
@@ -173,11 +174,10 @@ bool          encBtnLast       = HIGH;
 unsigned long encBtnDebounce   = 0;
 constexpr unsigned long ENC_BTN_DEBOUNCE_MS = 50;
 
-// Encoder position (direct reading — no external library needed)
-long     encPosition = 0;
-bool     encClkLast  = HIGH;
+// Encoder (PJRC Encoder library — interrupt-capable on Teensy 4.x)
+Encoder  enc(ENC_CLK_PIN, ENC_DT_PIN);
 long     encLastPos  = 0;
-constexpr int ENC_COUNTS_PER_DETENT = 1;  // one count per click with direct read
+constexpr int ENC_COUNTS_PER_DETENT = 4;  // PJRC library gives 4 counts per detent
 
 // ---------------------------------------------------------------------------
 // Per-jack runtime state
@@ -255,7 +255,6 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
                           JackMidiConfig &cfg,
                           uint8_t *exprBuf, CCPotentiometer *&exprPtr,
                           uint8_t *btnBuf, CCButton *&btnPtr);
-void updateEncoderPosition();
 void handleEncoder();
 void applyEncoderChange(int steps);
 void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
@@ -277,9 +276,7 @@ void setup() {
   pinMode(J3_DETECT_PIN, INPUT_PULLUP);
   pinMode(J4_DETECT_PIN, INPUT_PULLUP);
 
-  // Encoder pins
-  pinMode(ENC_CLK_PIN, INPUT_PULLUP);
-  pinMode(ENC_DT_PIN,  INPUT_PULLUP);
+  // Encoder button pin (CLK/DT handled by Encoder library)
   pinMode(ENC_SW_PIN,  INPUT_PULLUP);
 
   // OLED init
@@ -494,23 +491,11 @@ void applyEncoderChange(int steps) {
   }
 }
 
-// Read encoder pins — call every loop iteration.
-// Counts one step per detent (falling edge of CLK).
-void updateEncoderPosition() {
-  bool clk = digitalRead(ENC_CLK_PIN);
-  if (clk != encClkLast) {
-    encClkLast = clk;
-    if (clk == LOW) {  // falling edge
-      encPosition += (digitalRead(ENC_DT_PIN) == HIGH) ? 1 : -1;
-    }
-  }
-}
-
 void handleEncoder() {
   unsigned long now = millis();
 
-  // Sample the encoder pins first
-  updateEncoderPosition();
+  // Read encoder position (PJRC library tracks via interrupts)
+  long encPosition = enc.read();
 
   // --- Button: cycle through editable fields ---
   bool btn = digitalRead(ENC_SW_PIN);
