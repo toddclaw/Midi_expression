@@ -125,16 +125,19 @@ const char *ccName(uint8_t cc) {
 // change them at runtime.  Default values match the original design.
 // ---------------------------------------------------------------------------
 struct JackMidiConfig {
-  uint8_t cc;       // CC number (0–127)
-  uint8_t channel;  // MIDI channel (1–16, stored as 1-based for display)
-  bool    inverted; // Invert expression pedal output (127→0, 0→127)
+  uint8_t  cc;       // CC number (0–127)
+  uint8_t  channel;  // MIDI channel (1–16, stored as 1-based for display)
+  bool     inverted; // Invert expression pedal output (127→0, 0→127)
+  uint16_t calMin;   // Calibrated minimum ADC value (12-bit: 0–4095)
+  uint16_t calMax;   // Calibrated maximum ADC value (12-bit: 0–4095)
 };
 
 // Defaults — edit these or change at runtime via the rotary encoder
-JackMidiConfig j1Midi = { 64, 5, false };   // CC 64 Sustain,     Channel 5
-JackMidiConfig j2Midi = { 67, 5, false };   // CC 67 Soft Pedal,  Channel 5
-JackMidiConfig j3Midi = { 66, 5, false };   // CC 66 Sostenuto,   Channel 5
-JackMidiConfig j4Midi = { 11, 5, false };   // CC 11 Expression,  Channel 5
+// Default calibration range is full ADC span (0–4095)
+JackMidiConfig j1Midi = { 64, 5, false, 0, 4095 };   // CC 64 Sustain,     Channel 5
+JackMidiConfig j2Midi = { 67, 5, false, 0, 4095 };   // CC 67 Soft Pedal,  Channel 5
+JackMidiConfig j3Midi = { 66, 5, false, 0, 4095 };   // CC 66 Sostenuto,   Channel 5
+JackMidiConfig j4Midi = { 11, 5, false, 0, 4095 };   // CC 11 Expression,  Channel 5
 
 // Helper: build a MIDIAddress from a JackMidiConfig
 MIDIAddress midiAddr(const JackMidiConfig &cfg) {
@@ -190,19 +193,21 @@ constexpr unsigned long DISPLAY_INTERVAL_MS  = 100;   // OLED refresh rate (~10 
 // Rotary encoder — KY-040 for live MIDI parameter editing
 //
 // Push the button to cycle through editable fields:
-//   (off) → J1 CC → J1 Ch → J1 Inv → J2 CC → J2 Ch → J2 Inv →
-//           J3 CC → J3 Ch → J3 Inv → J4 CC → J4 Ch → J4 Inv → (off)
-// Rotate to change the selected value.  Edit mode auto-exits after
-// 10 seconds of inactivity.
+//   (off) → J1 CC → J1 Ch → J1 Inv → J1 Cal → J2 CC → J2 Ch → J2 Inv → J2 Cal →
+//           J3 CC → J3 Ch → J3 Inv → J3 Cal → J4 CC → J4 Ch → J4 Inv → J4 Cal → (off)
+// Rotate to change the selected value (or toggle for Inv/Cal).
+// CAL mode: Rotate encoder to enter/exit calibration. While calibrating,
+// exercise the pedal to full range. Exit CAL to save min/max to EEPROM.
+// Edit mode auto-exits after 10 seconds of inactivity.
 // ---------------------------------------------------------------------------
 enum class EditField : uint8_t {
   NONE,
-  J1_CC, J1_CH, J1_INV,
-  J2_CC, J2_CH, J2_INV,
-  J3_CC, J3_CH, J3_INV,
-  J4_CC, J4_CH, J4_INV,
+  J1_CC, J1_CH, J1_INV, J1_CAL,
+  J2_CC, J2_CH, J2_INV, J2_CAL,
+  J3_CC, J3_CH, J3_INV, J3_CAL,
+  J4_CC, J4_CH, J4_INV, J4_CAL,
 };
-constexpr uint8_t EDIT_FIELD_COUNT = 12;
+constexpr uint8_t EDIT_FIELD_COUNT = 16;
 
 EditField     editField        = EditField::NONE;
 unsigned long editLastActivity = 0;
@@ -234,6 +239,9 @@ struct JackState {
   PedalType  type          = PedalType::UNKNOWN;
   unsigned long settleEnd  = 0;       // debounce after plug event
   uint8_t    lastSent      = 0xFF;    // last CC value sent (0xFF = none)
+  bool       calibrating   = false;   // true when in calibration mode
+  uint16_t   calMinSeen    = 4095;    // min ADC value seen during cal
+  uint16_t   calMaxSeen    = 0;       // max ADC value seen during cal
 };
 
 JackState j1State, j2State, j3State, j4State;
@@ -447,8 +455,25 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
 
   // Update lastSent for display (Control Surface handles actual MIDI)
   if (st.type == PedalType::EXPRESSION) {
-    uint8_t v = analogRead(wiperPin) >> 5;
-    st.lastSent = min(v, (uint8_t)127);
+    uint16_t raw = analogRead(wiperPin);
+
+    // If calibrating, track min/max
+    if (st.calibrating) {
+      if (raw < st.calMinSeen) st.calMinSeen = raw;
+      if (raw > st.calMaxSeen) st.calMaxSeen = raw;
+    }
+
+    // Apply calibration mapping: raw [calMin..calMax] → [0..127]
+    uint16_t calMin = cfg.calMin;
+    uint16_t calMax = cfg.calMax;
+    if (calMax <= calMin) {
+      // Invalid calibration — fallback to raw >> 5
+      st.lastSent = min((uint8_t)(raw >> 5), (uint8_t)127);
+    } else {
+      // Map calibrated range to 0-127
+      int32_t mapped = ((int32_t)raw - calMin) * 127 / (calMax - calMin);
+      st.lastSent = constrain(mapped, 0, 127);
+    }
   } else {
     bool pressed = (st.type == PedalType::SWITCH_NC)
                    ? (digitalRead(wiperPin) == HIGH)
@@ -478,27 +503,34 @@ void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
 
 void applyEncoderChange(int steps) {
   JackMidiConfig *cfg = nullptr;
-  enum FieldType { CC, CH, INV } fieldType;
+  JackState *st = nullptr;
+  enum FieldType { CC, CH, INV, CAL } fieldType;
 
   switch (editField) {
-    case EditField::J1_CC:  cfg = &j1Midi; fieldType = CC;  break;
-    case EditField::J1_CH:  cfg = &j1Midi; fieldType = CH;  break;
-    case EditField::J1_INV: cfg = &j1Midi; fieldType = INV; break;
-    case EditField::J2_CC:  cfg = &j2Midi; fieldType = CC;  break;
-    case EditField::J2_CH:  cfg = &j2Midi; fieldType = CH;  break;
-    case EditField::J2_INV: cfg = &j2Midi; fieldType = INV; break;
-    case EditField::J3_CC:  cfg = &j3Midi; fieldType = CC;  break;
-    case EditField::J3_CH:  cfg = &j3Midi; fieldType = CH;  break;
-    case EditField::J3_INV: cfg = &j3Midi; fieldType = INV; break;
-    case EditField::J4_CC:  cfg = &j4Midi; fieldType = CC;  break;
-    case EditField::J4_CH:  cfg = &j4Midi; fieldType = CH;  break;
-    case EditField::J4_INV: cfg = &j4Midi; fieldType = INV; break;
+    case EditField::J1_CC:  cfg = &j1Midi; st = &j1State; fieldType = CC;  break;
+    case EditField::J1_CH:  cfg = &j1Midi; st = &j1State; fieldType = CH;  break;
+    case EditField::J1_INV: cfg = &j1Midi; st = &j1State; fieldType = INV; break;
+    case EditField::J1_CAL: cfg = &j1Midi; st = &j1State; fieldType = CAL; break;
+    case EditField::J2_CC:  cfg = &j2Midi; st = &j2State; fieldType = CC;  break;
+    case EditField::J2_CH:  cfg = &j2Midi; st = &j2State; fieldType = CH;  break;
+    case EditField::J2_INV: cfg = &j2Midi; st = &j2State; fieldType = INV; break;
+    case EditField::J2_CAL: cfg = &j2Midi; st = &j2State; fieldType = CAL; break;
+    case EditField::J3_CC:  cfg = &j3Midi; st = &j3State; fieldType = CC;  break;
+    case EditField::J3_CH:  cfg = &j3Midi; st = &j3State; fieldType = CH;  break;
+    case EditField::J3_INV: cfg = &j3Midi; st = &j3State; fieldType = INV; break;
+    case EditField::J3_CAL: cfg = &j3Midi; st = &j3State; fieldType = CAL; break;
+    case EditField::J4_CC:  cfg = &j4Midi; st = &j4State; fieldType = CC;  break;
+    case EditField::J4_CH:  cfg = &j4Midi; st = &j4State; fieldType = CH;  break;
+    case EditField::J4_INV: cfg = &j4Midi; st = &j4State; fieldType = INV; break;
+    case EditField::J4_CAL: cfg = &j4Midi; st = &j4State; fieldType = CAL; break;
     default: return;
   }
 
-  uint8_t oldCC  = cfg->cc;
-  uint8_t oldCh  = cfg->channel;
-  bool    oldInv = cfg->inverted;
+  uint8_t  oldCC  = cfg->cc;
+  uint8_t  oldCh  = cfg->channel;
+  bool     oldInv = cfg->inverted;
+  uint16_t oldMin = cfg->calMin;
+  uint16_t oldMax = cfg->calMax;
 
   if (fieldType == CC) {
     int v = (int)cfg->cc + steps;
@@ -506,16 +538,33 @@ void applyEncoderChange(int steps) {
   } else if (fieldType == CH) {
     int v = (int)cfg->channel + steps;
     cfg->channel = constrain(v, 1, 16);
-  } else {  // INV — toggle on any rotation
+  } else if (fieldType == INV) {
     cfg->inverted = !cfg->inverted;
+  } else if (fieldType == CAL) {
+    // Toggle calibration mode on any rotation
+    if (!st->calibrating) {
+      // Enter calibration mode — reset min/max tracking
+      st->calibrating = true;
+      st->calMinSeen = 4095;
+      st->calMaxSeen = 0;
+    } else {
+      // Exit calibration mode — save captured range to config
+      st->calibrating = false;
+      cfg->calMin = st->calMinSeen;
+      cfg->calMax = st->calMaxSeen;
+    }
   }
 
-  // Save to EEPROM whenever a change is made
-  if (cfg->cc != oldCC || cfg->channel != oldCh || cfg->inverted != oldInv) {
+  // Save to EEPROM whenever a change is made (except during active calibration)
+  bool configChanged = (cfg->cc != oldCC || cfg->channel != oldCh ||
+                        cfg->inverted != oldInv || cfg->calMin != oldMin ||
+                        cfg->calMax != oldMax);
+  if (configChanged && !st->calibrating) {
     saveConfig();
   }
 
-  if (cfg->cc == oldCC && cfg->channel == oldCh && cfg->inverted == oldInv) return;
+  // No rebuild needed if nothing changed or just toggled into CAL mode
+  if (!configChanged) return;
 
   // Zero the old CC so the host doesn't see a stuck controller
   if (cfg->cc != oldCC || cfg->channel != oldCh) {
@@ -523,32 +572,39 @@ void applyEncoderChange(int steps) {
   }
 
   // Rebuild the active Control Surface object with the new settings
-  switch (editField) {
-    case EditField::J1_CC:
-    case EditField::J1_CH:
-    case EditField::J1_INV:
-      rebuildExprJack(j1State, J1_TIP_PIN, J1_RING_PIN, J1_WIPER,
-                      j1Midi, j1ExprBuf, j1Expr, j1BtnBuf, j1Btn);
-      break;
-    case EditField::J2_CC:
-    case EditField::J2_CH:
-    case EditField::J2_INV:
-      rebuildExprJack(j2State, J2_TIP_PIN, J2_RING_PIN, J2_WIPER,
-                      j2Midi, j2ExprBuf, j2Expr, j2BtnBuf, j2Btn);
-      break;
-    case EditField::J3_CC:
-    case EditField::J3_CH:
-    case EditField::J3_INV:
-      rebuildExprJack(j3State, J3_TIP_PIN, J3_RING_PIN, J3_WIPER,
-                      j3Midi, j3ExprBuf, j3Expr, j3BtnBuf, j3Btn);
-      break;
-    case EditField::J4_CC:
-    case EditField::J4_CH:
-    case EditField::J4_INV:
-      rebuildExprJack(j4State, J4_TIP_PIN, J4_RING_PIN, J4_WIPER,
-                      j4Midi, j4ExprBuf, j4Expr, j4BtnBuf, j4Btn);
-      break;
-    default: break;
+  // (skipping during calibration since we're just tracking min/max)
+  if (!st->calibrating) {
+    switch (editField) {
+      case EditField::J1_CC:
+      case EditField::J1_CH:
+      case EditField::J1_INV:
+      case EditField::J1_CAL:
+        rebuildExprJack(j1State, J1_TIP_PIN, J1_RING_PIN, J1_WIPER,
+                        j1Midi, j1ExprBuf, j1Expr, j1BtnBuf, j1Btn);
+        break;
+      case EditField::J2_CC:
+      case EditField::J2_CH:
+      case EditField::J2_INV:
+      case EditField::J2_CAL:
+        rebuildExprJack(j2State, J2_TIP_PIN, J2_RING_PIN, J2_WIPER,
+                        j2Midi, j2ExprBuf, j2Expr, j2BtnBuf, j2Btn);
+        break;
+      case EditField::J3_CC:
+      case EditField::J3_CH:
+      case EditField::J3_INV:
+      case EditField::J3_CAL:
+        rebuildExprJack(j3State, J3_TIP_PIN, J3_RING_PIN, J3_WIPER,
+                        j3Midi, j3ExprBuf, j3Expr, j3BtnBuf, j3Btn);
+        break;
+      case EditField::J4_CC:
+      case EditField::J4_CH:
+      case EditField::J4_INV:
+      case EditField::J4_CAL:
+        rebuildExprJack(j4State, J4_TIP_PIN, J4_RING_PIN, J4_WIPER,
+                        j4Midi, j4ExprBuf, j4Expr, j4BtnBuf, j4Btn);
+        break;
+      default: break;
+    }
   }
 }
 
@@ -609,7 +665,7 @@ void handleEncoder() {
 // ---------------------------------------------------------------------------
 
 void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
-                 const JackMidiConfig &cfg, bool hlCC, bool hlCh, bool hlInv) {
+                 const JackMidiConfig &cfg, bool hlCC, bool hlCh, bool hlInv, bool hlCal) {
   // Line 1: "Jn: In TRS Expr" or "Jn: Unplugged" + optional "I" for inverted
   oled.setCursor(0, y);
   oled.print(F("J"));
@@ -618,6 +674,14 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
 
   if (!st.plugged) {
     oled.print(F(" Unplugged"));
+  } else if (st.calibrating) {
+    // Show "CAL" mode when actively calibrating
+    oled.print(F(" CAL "));
+    if (hlCal) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    oled.print(st.calMinSeen);
+    oled.print(F("-"));
+    oled.print(st.calMaxSeen);
+    if (hlCal) oled.setTextColor(SSD1306_WHITE);
   } else {
     oled.print(F(" In "));
     switch (st.type) {
@@ -628,8 +692,8 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
     }
   }
 
-  // Show "I" indicator at end of line if inverted
-  if (cfg.inverted && st.type == PedalType::EXPRESSION) {
+  // Show "I" indicator at end of line if inverted (unless calibrating)
+  if (!st.calibrating && cfg.inverted && st.type == PedalType::EXPRESSION) {
     oled.setCursor(114, y);
     if (hlInv) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
     oled.print(F("I"));
@@ -691,16 +755,16 @@ void updateDisplay() {
   // Four jack rows, each 14px tall (2 text lines with compact spacing)
   drawJackRow(8, 1, j1State, j1Midi,
               editField == EditField::J1_CC, editField == EditField::J1_CH,
-              editField == EditField::J1_INV);
+              editField == EditField::J1_INV, editField == EditField::J1_CAL);
   drawJackRow(22, 2, j2State, j2Midi,
               editField == EditField::J2_CC, editField == EditField::J2_CH,
-              editField == EditField::J2_INV);
+              editField == EditField::J2_INV, editField == EditField::J2_CAL);
   drawJackRow(36, 3, j3State, j3Midi,
               editField == EditField::J3_CC, editField == EditField::J3_CH,
-              editField == EditField::J3_INV);
+              editField == EditField::J3_INV, editField == EditField::J3_CAL);
   drawJackRow(50, 4, j4State, j4Midi,
               editField == EditField::J4_CC, editField == EditField::J4_CH,
-              editField == EditField::J4_INV);
+              editField == EditField::J4_INV, editField == EditField::J4_CAL);
 
   oled.display();
 }
