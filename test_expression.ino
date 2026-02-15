@@ -23,6 +23,8 @@ void setup() {
   pinMode(A0, OUTPUT);
   digitalWrite(A0, HIGH);
   analogReadResolution(12);
+  pinMode(A0, OUTPUT);
+  digitalWrite(A0, HIGH);  // drive Tip HIGH to power the FC3A potentiometer
   Control_Surface.begin();
   pedal.invert();
   }
