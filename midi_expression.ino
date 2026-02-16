@@ -8,7 +8,7 @@
 //   J3 — Sostenuto (CC 66)  Channel 5
 //   J4 — Pedal 4   (CC 11)  Channel 5
 //
-// 128x64 SSD1306 OLED on I2C (SDA=18, SCL=19) displays live status.
+// 128x64 SSD1306 OLED on Wire2 I2C (SDA2=25, SCL2=24) displays live status.
 // MIDI CC number and channel are runtime-configurable per jack
 // via a KY-040 rotary encoder (CLK=pin 4, DT=pin 5, SW=pin 6).
 //
@@ -32,13 +32,13 @@
 USBMIDI_Interface midi;
 
 // ---------------------------------------------------------------------------
-// OLED display — SSD1306 128x64 on I2C
+// OLED display — SSD1306 128x64 on I2C (Wire2: SCL2=24, SDA2=25)
 // ---------------------------------------------------------------------------
 constexpr uint8_t OLED_WIDTH  = 128;
 constexpr uint8_t OLED_HEIGHT = 64;
 constexpr uint8_t OLED_ADDR   = 0x3C;  // typical SSD1306 address
 
-Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire2, -1);
 
 // ---------------------------------------------------------------------------
 // Pin definitions (from SCHEMATIC.md)
@@ -55,14 +55,14 @@ constexpr pin_t J2_RING_PIN   = A3;  // pin 17 — analog, VCC sense
 constexpr pin_t J2_DETECT_PIN = 1;   // pin 1  — S_s plug detect
 
 // J3 — expression-capable socket (Sostenuto)
-constexpr pin_t J3_TIP_PIN    = A6;  // pin 20 — analog, pedal wiper
-constexpr pin_t J3_RING_PIN   = A7;  // pin 21 — analog, VCC sense
-constexpr pin_t J3_DETECT_PIN = 3;   // pin 3  — S_s plug detect
+constexpr pin_t J3_TIP_PIN    = A4;  // pin 18 — analog, pedal wiper
+constexpr pin_t J3_RING_PIN   = A5;  // pin 19 — analog, VCC sense
+constexpr pin_t J3_DETECT_PIN = 2;   // pin 2  — S_s plug detect
 
 // J4 — expression-capable socket (Pedal 4)
-constexpr pin_t J4_TIP_PIN    = A8;  // pin 22 — analog, pedal wiper
-constexpr pin_t J4_RING_PIN   = A9;  // pin 23 — analog, VCC sense
-constexpr pin_t J4_DETECT_PIN = 7;   // pin 7  — S_s plug detect
+constexpr pin_t J4_TIP_PIN    = A6;  // pin 20 — analog, pedal wiper
+constexpr pin_t J4_RING_PIN   = A7;  // pin 21 — analog, VCC sense
+constexpr pin_t J4_DETECT_PIN = 3;   // pin 3  — S_s plug detect
 
 // KY-040 rotary encoder (active-LOW outputs, power from 3.3 V only)
 constexpr pin_t ENC_CLK_PIN = 4;   // encoder A phase
@@ -330,8 +330,8 @@ void setup() {
   // Encoder button pin (CLK/DT handled by Encoder library)
   pinMode(ENC_SW_PIN,  INPUT_PULLUP);
 
-  // OLED init
-  Wire.begin();
+  // OLED init (Wire2: SCL2=24, SDA2=25)
+  Wire2.begin();
   if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     oled.clearDisplay();
     oled.setTextColor(SSD1306_WHITE);
