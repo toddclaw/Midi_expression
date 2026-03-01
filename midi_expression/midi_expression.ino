@@ -687,7 +687,13 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
   if (hlCh) oled.setTextColor(SSD1306_WHITE);
 
   oled.setCursor(108, y + 8);
-  if (!st.plugged || st.lastSent == 0xFF) {
+  if (hlCal && !st.calibrating) {
+    // CAL field selected but not yet calibrating — highlight "CAL" so the
+    // user can see this field is active (rotate encoder to start calibrating)
+    oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    oled.print(F("CAL"));
+    oled.setTextColor(SSD1306_WHITE);
+  } else if (!st.plugged || st.lastSent == 0xFF) {
     oled.print(F("---"));
   } else {
     if (st.lastSent < 100) oled.print(F(" "));
