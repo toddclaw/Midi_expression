@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Wire.h>
+#include <Control_Surface.h>
 
 // Rotary Encoder Pins
 #define ENCODER_CLK 4
@@ -17,14 +18,26 @@
 // Use I2C bus #2
 #define OLED_WIRE Wire2
 
+USBMIDI_Interface midi;
+CCPotentiometer expression(A1, {MIDI_CC::Expression_Controller, Channel_1});
+
 Encoder myEncoder(ENCODER_CLK, ENCODER_DT);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &OLED_WIRE, OLED_RESET);
 
 long lastPosition = -999;
 bool lastButtonState = HIGH;
+uint8_t lastExprValue = 255;
 
 void setup() {
   Serial.begin(115200);
+
+  // A0 high (TRS ring/sense held high → expression pedal detected)
+  // Pin 0 low (plug-detect held low → no unplug interrupts)
+  pinMode(A0, OUTPUT); digitalWrite(A0, HIGH);
+  pinMode(0,  OUTPUT); digitalWrite(0,  LOW);
+
+  analogReadResolution(12);
+  Control_Surface.begin();
 
   pinMode(ENCODER_SW, INPUT_PULLUP);
 
@@ -48,12 +61,15 @@ void setup() {
 }
 
 void loop() {
+  Control_Surface.loop();
+
   long position = myEncoder.read() / 4;  
   // Divide by 4 because KY-040 generates 4 counts per detent
 
   bool buttonState = digitalRead(ENCODER_SW);
+  uint8_t exprValue = expression.getValue();
 
-  if (position != lastPosition || buttonState != lastButtonState) {
+  if (position != lastPosition || buttonState != lastButtonState || exprValue != lastExprValue) {
 
     display.clearDisplay();
 
@@ -64,7 +80,11 @@ void loop() {
     display.print(position);
 
     display.setTextSize(1);
-    display.setCursor(0, 54);
+    display.setCursor(0, 48);
+    display.print("Expr: ");
+    display.print(exprValue);
+
+    display.setCursor(0, 57);
     display.print("Button: ");
     display.print(buttonState == LOW ? "Pressed" : "Released");
 
@@ -72,6 +92,7 @@ void loop() {
 
     lastPosition = position;
     lastButtonState = buttonState;
+    lastExprValue = exprValue;
   }
 }
 
