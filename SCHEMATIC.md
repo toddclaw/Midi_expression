@@ -132,7 +132,7 @@ potentiometer wired Tip = wiper, Ring = VCC end, Sleeve = GND end.
                    │            │                        │          │
           T_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
-          R_s   ●──┤            ├──── NC                 │          │
+          R_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
             S   ●──┤            ├──── GND                │          │
                    │            │         R9 [1.2 kΩ]    │          │
@@ -148,7 +148,7 @@ potentiometer wired Tip = wiper, Ring = VCC end, Sleeve = GND end.
 | T        | → R1 (1 kΩ) → A0 (pin 14), with C1 (100 nF) to GND | Reads expression wiper or switch state. R1 + C1 form a 1.6 kHz low-pass filter for noise rejection. R1 also limits current during hot-plug transients. |
 | R        | → R2 (1 kΩ) → A1 (pin 15), with C2 (100 nF) to GND | Reads Ring voltage. Software uses ADC to detect pedal type. R2 + C2 form a 1.6 kHz LPF. R2 limits short-circuit current to 3.3 mA if a TS plug grounds Ring. |
 | T_s      | → GND | Grounds the Tip analog input when no plug is inserted, preventing a floating ADC reading. Connection breaks when plug is inserted. |
-| R_s      | → NC (not connected) | Not used. |
+| R_s      | → GND | Grounds the Ring analog input when no plug is inserted, preventing a floating ADC reading. Connection breaks when plug is inserted. |
 | S        | → GND | Common ground / shield. |
 | S_s      | → R9 (1.2 kΩ) → pin 0 (INPUT_PULLUP) | **Plug detect.** R9 provides series protection. When no plug: S_s is shorted to S (GND) → reads **LOW**. When plug inserted: S_s disconnects → internal pull-up → reads **HIGH**. |
 
@@ -183,7 +183,7 @@ accept an expression pedal here.
                    │            │                        │          │
           T_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
-          R_s   ●──┤            ├──── NC                 │          │
+          R_s   ●──┤            ├──── GND                 │          │
                    │            │                        │          │
             S   ●──┤            ├──── GND                │          │
                    │            │         R10 [1.2 kΩ]   │          │
@@ -227,7 +227,7 @@ and on/off switches.
                    │            │                        │          │
           T_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
-          R_s   ●──┤            ├──── NC                 │          │
+          R_s   ●──┤            ├──── GND                 │          │
                    │            │                        │          │
             S   ●──┤            ├──── GND                │          │
                    │            │         R11 [1.2 kΩ]   │          │
@@ -271,7 +271,7 @@ and on/off switches.
                    │            │                        │          │
           T_s   ●──┤            ├──── GND                │          │
                    │            │                        │          │
-          R_s   ●──┤            ├──── NC                 │          │
+          R_s   ●──┤            ├──── GND                 │          │
                    │            │                        │          │
             S   ●──┤            ├──── GND                │          │
                    │            │         R12 [1.2 kΩ]   │          │
@@ -380,8 +380,8 @@ and DT wires.
              GND ─────────┤ GND          │
                            └──────────────┘
 
-  All T_s pins ──── GND    (ground analog/digital inputs when unplugged)
-  J1.R_s, J2.R_s, J3.R_s, J4.R_s ──── NC
+  All T_s pins ──── GND    (ground Tip inputs when unplugged)
+  All R_s pins ──── GND    (ground Ring inputs when unplugged)
 ```
 
 ---
@@ -431,6 +431,8 @@ to ground.
 
 - **T_s → GND** on all four sockets grounds the Tip input when no
   plug is present, giving a clean 0 V / LOW instead of floating noise.
+- **R_s → GND** on all four sockets grounds the Ring input when no
+  plug is present, similarly preventing floating ADC readings.
 
 ---
 
@@ -468,5 +470,5 @@ can distinguish pedal types at runtime:
   **J1** = Sustain, **J2** = Soft, **J3** = Sostenuto, **J4** = Expression.
 - All four jacks are expression-capable and auto-detect pedal type (TRS expression
   vs TS switch, NO vs NC polarity).
-- Per-jack invert and calibration settings are saved to EEPROM and persist
-  across power cycles.
+- Per-jack invert, wiper polarity (Tip/Ring), and calibration settings are
+  saved to EEPROM and persist across power cycles.
