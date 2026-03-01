@@ -647,12 +647,16 @@ void drawJackRow(uint8_t y, uint8_t jackNum, const JackState &st,
     oled.print(cfg.wiperOnRing ? F("R") : F("T"));
     if (hlWip) oled.setTextColor(SSD1306_WHITE);
 
-    // Invert indicator at col 120: "I" only if inverted
-    if (cfg.inverted && st.type == PedalType::EXPRESSION) {
+    // Invert indicator at col 120: always show when field is selected,
+    // otherwise show "I" only if currently inverted
+    if (hlInv) {
       oled.setCursor(120, y);
-      if (hlInv) oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+      oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+      oled.print(cfg.inverted ? F("I") : F("."));
+      oled.setTextColor(SSD1306_WHITE);
+    } else if (cfg.inverted && st.type == PedalType::EXPRESSION) {
+      oled.setCursor(120, y);
       oled.print(F("I"));
-      if (hlInv) oled.setTextColor(SSD1306_WHITE);
     }
   }
 
