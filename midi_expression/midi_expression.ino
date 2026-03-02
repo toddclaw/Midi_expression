@@ -381,14 +381,16 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     st.plugged = true;
     st.type = classifyJack(sensePin, wiperPin);
     if (st.type == PedalType::EXPRESSION)
-      createExpr(exprBuf, exprPtr, wiperPin, cfg);
+      st.lastSent = 0xFF;  // force initial MIDI send; expression handled manually below
     else
       createBtn(btnBuf, btnPtr, wiperPin, cfg, st.type == PedalType::SWITCH_NC);
   }
 
   if (!st.plugged) return;
 
-  // Update lastSent for display (Control Surface handles actual MIDI)
+  // Expression pedals: apply calibration + inversion and send MIDI directly.
+  // CCPotentiometer is not used for expression — it has no way to apply the
+  // calibration range, so inversion and calibration are both handled here.
   if (st.type == PedalType::EXPRESSION) {
     uint16_t raw = analogRead(wiperPin);
 
@@ -401,13 +403,23 @@ void handleExpressionJack(JackState &st, pin_t detectPin, pin_t tipPin,
     // Apply calibration mapping: raw [calMin..calMax] → [0..127]
     uint16_t calMin = cfg.calMin;
     uint16_t calMax = cfg.calMax;
+    uint8_t value;
     if (calMax <= calMin) {
       // Invalid calibration — fallback to raw >> 5
-      st.lastSent = min((uint8_t)(raw >> 5), (uint8_t)127);
+      value = min((uint8_t)(raw >> 5), (uint8_t)127);
     } else {
       // Map calibrated range to 0-127
       int32_t mapped = ((int32_t)raw - calMin) * 127 / (calMax - calMin);
-      st.lastSent = constrain(mapped, 0, 127);
+      value = (uint8_t)constrain(mapped, 0, 127);
+    }
+
+    // Apply inversion
+    if (cfg.inverted) value = 127 - value;
+
+    // Send MIDI only when the value changes (change detection avoids flooding)
+    if (value != st.lastSent) {
+      midi.sendControlChange(midiAddr(cfg), value);
+      st.lastSent = value;
     }
   } else {
     bool pressed = (st.type == PedalType::SWITCH_NC)
@@ -426,11 +438,12 @@ void rebuildExprJack(JackState &st, pin_t tipPin, pin_t ringPin,
                      uint8_t *exprBuf, CCPotentiometer *&exprPtr,
                      uint8_t *btnBuf, CCButton *&btnPtr) {
   if (!st.plugged) return;
-  pin_t wiperPin = cfg.wiperOnRing ? ringPin : tipPin;
   if (st.type == PedalType::EXPRESSION) {
-    destroyExpr(exprPtr);
-    createExpr(exprBuf, exprPtr, wiperPin, cfg);
+    // Expression MIDI is sent directly in handleExpressionJack (not via
+    // CCPotentiometer), so a config change just needs a forced re-send.
+    st.lastSent = 0xFF;
   } else if (st.type == PedalType::SWITCH_NO || st.type == PedalType::SWITCH_NC) {
+    pin_t wiperPin = cfg.wiperOnRing ? ringPin : tipPin;
     destroyBtn(btnPtr);
     createBtn(btnBuf, btnPtr, wiperPin, cfg, st.type == PedalType::SWITCH_NC);
   }
